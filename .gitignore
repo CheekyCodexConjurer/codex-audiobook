@@ -1,0 +1,12 @@
+*.bak
+*.tmp
+*.log
+*.local.*
+.DS_Store
+Thumbs.db
+__pycache__/
+*.py[cod]
+.venv/
+.state/
+artifacts/
+books/

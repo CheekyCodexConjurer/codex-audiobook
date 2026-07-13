@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "source": {
+    "path": "source/original.pdf",
+    "original_path": "",
+    "original_file_name": "",
+    "sha256": "",
+    "format": "pdf",
+    "page_count_physical": 0,
+    "page_count_logical": 0
+  },
+  "analysis": {
+    "status": "needs_analysis",
+    "layout": "single",
+    "rotation": "normal",
+    "extraction_mode": "visual",
+    "source_language": "",
+    "narration_language": "pt-BR"
+  },
+  "page_number_alignment": {
+    "segments": []
+  },
+  "toc_chapters": [],
+  "chapters": [],
+  "ranges": {
+    "ignored": [],
+    "narration_excluded": []
+  },
+  "pages": [],
+  "warnings": []
+}

@@ -1,0 +1,20 @@
+{
+  "name": "codex-audiobook",
+  "interface": {
+    "displayName": "Codex Audiobook"
+  },
+  "plugins": [
+    {
+      "name": "audiobook-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/audiobook-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "audiobook-codex",
+  "version": "0.1.0+codex.20260713153507",
+  "description": "Native-only Codex workflow for mapping books, producing faithful text, and rendering local Kokoro audiobooks.",
+  "author": {
+    "name": "Matheus"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Audiobook Codex",
+    "shortDescription": "Map books, verify text, and render local audiobook audio.",
+    "longDescription": "A Codex-only audiobook workflow for PDF and EPUB sources. It uses native PDF and Computer Use capabilities when available, Codex agents for visual transcription, and a local Kokoro runtime for PT-BR audio.",
+    "developerName": "Matheus",
+    "category": "Productivity",
+    "capabilities": [],
+    "defaultPrompt": "$audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\\Pessoal\\e-books} output{book-map.json}"
+  }
+}
