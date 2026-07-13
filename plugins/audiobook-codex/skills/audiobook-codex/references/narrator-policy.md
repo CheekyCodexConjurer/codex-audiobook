@@ -17,6 +17,7 @@ Apply this policy only after source text has passed its page ledger.
 - Repair an uncertain word by guessing.
 - Merge unrelated fragments across a page boundary.
 - Delete meaningful source text without a map-backed exclusion.
+- Reuse EPUB alt text or a generated restoration prompt as narrator content. EPUB accessibility annotations and image derivatives are separate artifacts.
 
 ## Required Change Records
 

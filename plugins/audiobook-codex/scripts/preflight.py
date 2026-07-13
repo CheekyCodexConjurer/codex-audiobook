@@ -14,6 +14,8 @@ import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 
+from asset_inventory import source_image_assets, write_assets_manifest
+
 
 DEFAULT_LIBRARY_ROOT = Path(r"E:\Pessoal\e-books")
 
@@ -29,6 +31,13 @@ def sha256_file(path: Path) -> str:
 def write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def load_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"Cannot read JSON {path}: {error}") from error
 
 
 def iso_now() -> str:
@@ -395,6 +404,11 @@ def main() -> None:
     parser.add_argument("--narration-language", default="pt-BR")
     parser.add_argument("--skip-render", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--assets-only",
+        action="store_true",
+        help="Extract or refresh original image assets without replacing an existing book map.",
+    )
     args = parser.parse_args()
 
     original_source = args.source.expanduser().resolve()
@@ -404,19 +418,48 @@ def main() -> None:
         raise SystemExit("--dpi must be at least 72.")
 
     source_sha256 = sha256_file(original_source)
+    inferred_output_dir = args.output_dir
+    if (
+        args.assets_only
+        and inferred_output_dir is None
+        and original_source.parent.name.lower() == "source"
+        and original_source.stem.lower() == "original"
+    ):
+        inferred_output_dir = original_source.parent.parent
     try:
         output_root = select_book_root(
             original_source,
             source_sha256,
             args.library_root,
             str(args.book_id).strip(),
-            args.output_dir,
+            inferred_output_dir,
         )
         source = stage_source(original_source, output_root, source_sha256)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
 
     map_path = output_root / "metadata" / "book-map.json"
+    if args.assets_only:
+        if not map_path.is_file():
+            raise SystemExit(f"Book map is required for --assets-only: {map_path}")
+        try:
+            book_map = load_json(map_path)
+        except RuntimeError as error:
+            raise SystemExit(str(error)) from error
+        if not isinstance(book_map, dict) or not isinstance(book_map.get("pages"), list):
+            raise SystemExit(f"Book map has no pages: {map_path}")
+        map_source = book_map.get("source")
+        if not isinstance(map_source, dict) or map_source.get("sha256") != source_sha256:
+            raise SystemExit("Book map source hash does not match --source.")
+        assets_path = write_assets_manifest(
+            output_root,
+            source_sha256,
+            source_image_assets(source, output_root, book_map["pages"]),
+        )
+        print(f"Book root: {output_root}")
+        print(f"Refreshed {assets_path}")
+        return
+
     if map_path.exists() and not args.overwrite:
         raise SystemExit(f"Map already exists: {map_path}. Use a new output directory or --overwrite.")
 
@@ -467,9 +510,15 @@ def main() -> None:
         }
     )
     write_json(map_path, book_map)
+    assets_path = write_assets_manifest(
+        output_root,
+        source_sha256,
+        source_image_assets(source, output_root, pages),
+    )
     print(f"Book root: {output_root}")
     print(f"Stored source: {source}")
     print(f"Created {map_path}")
+    print(f"Created {assets_path}")
     print(
         f"Source: {book_map['source']['format']}, logical units: {book_map['source']['page_count_logical']}, "
         f"extraction mode: {book_map['analysis']['extraction_mode']}"

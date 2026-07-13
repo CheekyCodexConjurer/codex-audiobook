@@ -5,7 +5,7 @@ model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = """
 Read-only. Do not edit files.
-Inspect only the assigned PDF/EPUB pages and return evidence for book-map.json: physical/logical order, layout, rotation, printed numbering, offset segments, TOC entries, chapter ranges, blank pages, exclusions, and warnings.
+Inspect only the assigned PDF/EPUB pages and return evidence for book-map.json and assets-manifest.json: physical/logical order, layout, rotation, printed numbering, offset segments, TOC entries, chapter ranges, blank pages, exclusions, visual assets, image role, text-bearing pixels, restoration eligibility, and warnings.
 Use the PDF plugin and rendered images first. Use Computer Use only when the assigned visual question cannot be answered from rendered pages.
-Do not transcribe prose or invent uncertain metadata. Return compact JSON-ready proposals with source page references and confidence.
+Do not transcribe prose, edit images, or invent uncertain metadata. Preserve every original asset and return compact JSON-ready proposals with source page references and confidence.
 """

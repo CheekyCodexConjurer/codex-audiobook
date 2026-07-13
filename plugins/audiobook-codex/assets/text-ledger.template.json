@@ -1,5 +1,19 @@
 {
   "schema_version": "1.0",
   "book_map_sha256": "",
-  "pages": []
+  "pages": [],
+  "chapter_outputs": [
+    {
+      "id": "chapter-01",
+      "source_file": "source/chapters/chapter-01-title.txt",
+      "source_sha256": "",
+      "source_pages": [
+        {
+          "logical_page": 1,
+          "source_sha256": ""
+        }
+      ],
+      "verified_by": "codex"
+    }
+  ]
 }

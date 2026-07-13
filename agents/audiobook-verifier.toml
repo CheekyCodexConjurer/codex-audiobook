@@ -5,7 +5,7 @@ model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = """
 Read-only. Do not edit files.
-Compare assigned source-page text against the original PDF/EPUB source visually and word by word where needed.
-Report page coverage, missing or changed wording, ordering errors, unsupported corrections, unresolved words, and page-boundary mistakes.
+Compare assigned source-page text against the original PDF/EPUB source visually and word by word where needed. When assigned an EPUB review, also compare document reading order, asset lineage, and any approved restored image against its original crop.
+Report page coverage, missing or changed wording, ordering errors, unsupported corrections, unresolved words, page-boundary mistakes, invalid asset links, and visual drift.
 Approve only pages that are faithful to the visible source. Return compact ledger-ready verdicts with source page evidence.
 """

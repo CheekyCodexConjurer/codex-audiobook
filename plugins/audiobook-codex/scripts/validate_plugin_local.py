@@ -70,17 +70,35 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
 
     for filename in (
         "preflight.py",
+        "asset_inventory.py",
         "validate_book_map.py",
+        "validate_assets_manifest.py",
         "verify_text_ledger.py",
+        "build_epub_manifest.py",
+        "epub_presentation.py",
+        "export_epub.py",
+        "validate_epub_export.py",
         "render_kokoro.py",
+        "render_chatterbox.py",
+        "publish_artifacts.py",
         "test_tools.py",
     ):
         if not (plugin_root / "scripts" / filename).is_file():
             errors.append(f"plugin is missing scripts/{filename}")
     for filename in (
         "book-map.template.json",
+        "assets-manifest.template.json",
         "text-ledger.template.json",
+        "epub-manifest.template.json",
         "narrator-changes.template.json",
+    ):
+        if not (plugin_root / "assets" / filename).is_file():
+            errors.append(f"plugin is missing assets/{filename}")
+    for filename in (
+        "fonts/im-fell-english/IMFeENrm28P.ttf",
+        "fonts/im-fell-english/IMFeENit28P.ttf",
+        "fonts/im-fell-english/OFL.txt",
+        "voices/Feminina.mp3",
     ):
         if not (plugin_root / "assets" / filename).is_file():
             errors.append(f"plugin is missing assets/{filename}")

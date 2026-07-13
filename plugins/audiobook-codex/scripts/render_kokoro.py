@@ -36,6 +36,7 @@ def iso_now() -> str:
 
 
 def write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -158,10 +159,23 @@ def transcode(final_wav: Path, output_path: Path, audio_format: str) -> None:
         raise RuntimeError(completed.stderr.strip() or "ffmpeg audio conversion failed")
 
 
+def relative_to(path: Path, root: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def require_under(path: Path, root: Path, label: str) -> None:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError as error:
+        raise RuntimeError(f"{label} must remain under {root}: {path}") from error
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render local Kokoro audiobook audio from narrator text.")
     parser.add_argument("--input-file", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--book-root", type=Path)
+    parser.add_argument("--standalone", action="store_true")
     parser.add_argument("--voice", default="pm_alex")
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--format", choices=("wav", "m4a", "mp3"), default="m4a")
@@ -178,6 +192,23 @@ def main() -> None:
 
     input_file = args.input_file.expanduser().resolve()
     output_dir = args.output_dir.expanduser().resolve()
+    book_root = args.book_root.expanduser().resolve() if args.book_root else None
+    if (book_root is None) != args.standalone:
+        raise SystemExit("Use exactly one of --book-root or --standalone.")
+    if book_root is not None:
+        audio_root = book_root / "audio"
+        mock_root = audio_root / "mock"
+        require_under(input_file, book_root / "text" / "locutor", "Narrator input")
+        if args.mock:
+            require_under(output_dir, mock_root, "Mock audio output")
+        else:
+            require_under(output_dir, audio_root, "Audio output")
+            try:
+                output_dir.relative_to(mock_root.resolve())
+            except ValueError:
+                pass
+            else:
+                raise SystemExit("Non-mock audio output must not use audio/mock.")
     text = input_file.read_text(encoding="utf-8").strip()
     if not text:
         raise SystemExit(f"Input text file is empty: {input_file}")
@@ -193,7 +224,11 @@ def main() -> None:
     raw_dir.mkdir(parents=True, exist_ok=True)
     final_wav = raw_dir / "audiobook.wav"
     final_audio = output_dir / f"audiobook.{args.format}"
-    manifest_path = output_dir / "audio-manifest.json"
+    manifest_path = (
+        book_root / "metadata" / "audio-manifest.json"
+        if book_root is not None
+        else output_dir / "audio-manifest.json"
+    )
     if (final_wav.exists() or final_audio.exists() or manifest_path.exists()) and not args.overwrite:
         raise SystemExit(f"Audio artifacts already exist in {output_dir}. Use --overwrite to replace them.")
 
@@ -221,20 +256,33 @@ def main() -> None:
 
     duration = join_wavs(segment_paths, final_wav, args.silence_seconds)
     transcode(final_wav, final_audio, args.format)
+    def manifest_path_value(path: Path) -> str:
+        return relative_to(path, book_root) if book_root is not None else path.relative_to(output_dir).as_posix()
+
     manifest = {
         "schema_version": "1.0",
         "generated_at": iso_now(),
         "mock": args.mock,
-        "input_file": str(input_file),
+        "render_mode": "mock" if args.mock else "real",
+        "input_file": manifest_path_value(input_file) if book_root is not None else str(input_file),
         "input_sha256": sha256_file(input_file),
+        "output_dir": manifest_path_value(output_dir),
         "voice": args.voice,
         "speed": args.speed,
         "language": "pt-BR",
         "sample_rate": SAMPLE_RATE,
-        "final_wav": final_wav.relative_to(output_dir).as_posix(),
-        "final_audio": final_audio.relative_to(output_dir).as_posix(),
+        "final_wav": manifest_path_value(final_wav),
+        "final_wav_sha256": sha256_file(final_wav),
+        "final_audio": manifest_path_value(final_audio),
+        "final_audio_sha256": sha256_file(final_audio),
         "duration_seconds": round(duration, 3),
-        "segments": segment_records,
+        "segments": [
+            {
+                **record,
+                "path": manifest_path_value(output_dir / record["path"]),
+            }
+            for record in segment_records
+        ],
     }
     write_json(manifest_path, manifest)
     print(f"Rendered {len(segment_paths)} segment(s): {final_audio}")
