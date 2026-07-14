@@ -9,6 +9,8 @@ textos, não apenas pela proximidade no prompt principal.
 Este documento registra a calibração concluída em 14 de julho de 2026. Ele não
 afirma que o Chatterbox reproduz exatamente a fonte em qualquer texto novo. A
 decisão é válida para a referência, corpus, runtime e modelo hashados abaixo.
+O registro estruturado de promoção é
+`plugins/audiobook-codex/assets/voices/feminina-v1.promotion.json`.
 
 ## Origem e Entradas Imutáveis
 
@@ -137,6 +139,9 @@ SHA-256: 5c9e0f38e679c03b99ca0c01318f0a668d47f14e453510a89dcad927d416471b
 duração: 24.840 s
 ```
 
+O MP3 de entrega correspondente tem SHA-256
+`9299bbe5c869bae3dac911b066cb64d37964e0f7074ff1ca06614a08b55b4a4e`.
+
 No experimento específico do prompt principal, o WAV bruto obteve proxy de
 proximidade `0.901946` e cosseno de embedding `0.967617`. Esse proxy não é a
 mesma medida agregada da seleção cross-prompt e não deve ser comparado
@@ -168,9 +173,10 @@ MP3 continua sendo apenas o formato de entrega.
 ## Integração de Produção
 
 `render_chatterbox.py` reconhece `feminina-v1` somente quando a referência, seus
-hashes, os hashes dos checkpoints, a versão `chatterbox-tts`, o dispositivo CUDA,
-o texto e todos os parâmetros correspondem ao registro de promoção. Caso contrário,
-o manifesto declara o perfil como `custom`.
+hashes, os hashes dos checkpoints, a versão `chatterbox-tts`, o dispositivo CUDA e
+todos os parâmetros correspondem ao registro de promoção. O renderizador aplica a
+política de texto do perfil, mas não restringe cada render a um único hash de entrada.
+Caso contrário, o manifesto declara o perfil como `custom`.
 
 O texto do locutor deve ter uma locução completa por linha não vazia, até 320
 caracteres. Números e abreviações devem ser escritos por extenso em PT-BR. O
@@ -189,7 +195,10 @@ $python = 'E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe'
 ```
 
 O resultado deve ser verificado contra o hash do WAV acima, não apenas pelo nome
-do perfil.
+do perfil. Mesmo usando `--format mp3`, o renderizador preserva o sinal bruto em
+`E:\Pessoal\e-books\_voice-calibration-feminina\repro-run\raw\audiobook.wav`;
+confira a chave `final_wav_sha256` em
+`E:\Pessoal\e-books\_voice-calibration-feminina\repro-run\audio-manifest.json`.
 
 ## Limitações e Próxima Calibração
 

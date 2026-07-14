@@ -5,9 +5,14 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+from import_calibration_targets import import_targets
+from init_calibration_workspace import initialize_workspace
 
 
 def run(script: str, *args: str) -> None:
@@ -36,14 +41,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="voice-calibration-") as temporary:
         root = Path(temporary)
         library = root / "library"
-        run(
-            "init_calibration_workspace.py",
-            "--profile-id",
-            "test-voice-v1",
-            "--library-root",
-            str(library),
-        )
-        workspace = library / "_voice-calibration-test-voice-v1"
+        workspace = initialize_workspace("test-voice-v1", library)
         run(
             "validate_calibration_workspace.py",
             "--workspace-root",
@@ -86,6 +84,26 @@ def main() -> None:
             target = source / f"{prompt_id}.mp3"
             target.write_bytes(prompt_id.encode("ascii"))
             targets[prompt_id] = target
+        copy2 = __import__("import_calibration_targets").shutil.copy2
+        calls = 0
+
+        def interrupt_copy(source_path: object, destination_path: object) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError("simulated interrupted import")
+            return copy2(source_path, destination_path)
+
+        with patch("import_calibration_targets.shutil.copy2", side_effect=interrupt_copy):
+            try:
+                import_targets(workspace, reference, targets)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("Interrupted import unexpectedly succeeded.")
+        assert list((workspace / "references" / "original").iterdir()) == []
+        interrupted_corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
+        assert interrupted_corpus["status"] == "draft"
         run(
             "import_calibration_targets.py",
             "--workspace-root",

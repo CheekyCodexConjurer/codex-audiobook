@@ -150,6 +150,7 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "epub_presentation.py",
         "export_epub.py",
         "validate_epub_export.py",
+        "validate_feminina_profile.py",
         "path_safety.py",
         "audio_tools.py",
         "render_chatterbox.py",
@@ -173,9 +174,16 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "fonts/im-fell-english/IMFeENit28P.ttf",
         "fonts/im-fell-english/OFL.txt",
         "voices/Feminina.mp3",
+        "voices/feminina-v1.promotion.json",
     ):
         if not (plugin_root / "assets" / filename).is_file():
             errors.append(f"plugin is missing assets/{filename}")
+    promotion_path = plugin_root / "assets" / "voices" / "feminina-v1.promotion.json"
+    if promotion_path.is_file():
+        try:
+            load_json(promotion_path)
+        except RuntimeError as error:
+            errors.append(str(error))
 
     if marketplace_path is not None:
         try:

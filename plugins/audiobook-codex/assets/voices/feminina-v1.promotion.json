@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0",
+  "profile_name": "feminina-v1",
+  "status": "approved",
+  "engine": "chatterbox-multilingual-v3-pt-br",
+  "voice_reference": {
+    "path": "assets/voices/Feminina.mp3",
+    "sha256": "20d890c2a97bc2dd97b4ea4021e83681c00830c7b2e8894f944776e44eacde9f"
+  },
+  "text_policy": {
+    "name": "line-delimited-v1",
+    "max_chars": 320
+  },
+  "parameters": {
+    "max_chars": 320,
+    "silence_seconds": 0.22,
+    "exaggeration": 0.55,
+    "cfg_weight": 0.502,
+    "temperature": 0.8,
+    "repetition_penalty": 1.2,
+    "min_p": 0.114,
+    "top_p": 1.0,
+    "seed": 20260713
+  },
+  "calibration": {
+    "selection_id": "cross-prompt-selection-minp-final-2026-07-14",
+    "corpus": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-feminina\\validation-corpus\\corpus.json",
+      "sha256": "908c271cc1e268510910ee5bba119dc69dbaa8686538a97a87c61739ac5d09a6"
+    },
+    "selection": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-feminina\\cross-prompt-selection-minp-final-2026-07-14\\selection.json",
+      "sha256": "656a9e32a603967c9dc2dd3dffd61f67248ba53aeb955b7f00f79ef6aba6a753",
+      "winner_id": "minp-0-114-temp-0-80",
+      "robust_score": 0.615687,
+      "mean_composite_score": 0.631555,
+      "minimum_composite_score": 0.578662
+    }
+  },
+  "runtime": {
+    "device": "cuda",
+    "model_root": "E:\\Pessoal\\tts\\chatterbox-multilingual-v3\\models",
+    "chatterbox_tts_version": "0.1.7",
+    "model": {
+      "t3_sha256": "074aaf65255eb9cb960288f7cc72e09d3b5008f6e0b14868c0d4e5b0bd7cbb6c",
+      "s3gen_sha256": "f7abce4b196dae2d08d9296cbebc6521b046079577643b42a19a03499d08721e",
+      "voice_encoder_sha256": "4b16d836bc598509860f6fa068165a8bb5e9ac84f05582dfcf278a5a372879f1"
+    }
+  },
+  "listening_review": {
+    "status": "approved",
+    "scope": "paired review of finalists across narration, dialogue, and numeric/date prompts"
+  },
+  "dsp": {
+    "status": "raw-wav-retained",
+    "raw_proxy_score": 0.901946,
+    "notes": "No loudness, EQ, compressor, de-esser, limiter, or DSP chain improved the approved raw WAV."
+  },
+  "reproduction": {
+    "input": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-feminina\\prompt-rendered.txt",
+      "sha256": "d022cf11c95d050302e9557aaf2951d097a75cefd39dd77e2510ed2b8a5c2274"
+    },
+    "raw_wav": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-feminina\\final-eleven-v3-match\\raw\\audiobook.wav",
+      "sha256": "5c9e0f38e679c03b99ca0c01318f0a668d47f14e453510a89dcad927d416471b",
+      "duration_seconds": 24.84
+    },
+    "delivery_mp3": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-feminina\\final-eleven-v3-match\\audiobook.mp3",
+      "sha256": "9299bbe5c869bae3dac911b066cb64d37964e0f7074ff1ca06614a08b55b4a4e"
+    }
+  }
+}
