@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import zipfile
 
 
@@ -80,6 +81,134 @@ def write_pdf_with_image(path: Path, image_path: Path) -> None:
 
 def main() -> None:
     from pypdf import PdfWriter
+    from chatterbox_text import DEFAULT_MAX_CHARS, NarratorTextError, prepare_chatterbox_segments
+    from render_chatterbox import (
+        DEFAULT_MODEL_ROOT,
+        DEFAULT_REFERENCE_VOICE,
+        FEMININA_PROFILE,
+        FEMININA_PROFILE_CALIBRATION,
+        selected_profile,
+    )
+
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+    assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
+    calibration_text = (
+        "Na manhã de junho, a chuva fina cobria o jardim, enquanto a brisa movia "
+        "lentamente as folhas. O relógio marcou oito e trinta. João abriu a janela "
+        'e perguntou: "Quem deixou a pequena caixa azul junto à porta?" Após um breve '
+        'silêncio, respirou devagar e disse: "Muito bem. Hoje começa uma nova história."'
+    )
+    calibration_segments = prepare_chatterbox_segments(calibration_text, DEFAULT_MAX_CHARS)
+    assert len(calibration_text) == 302
+    assert len(calibration_segments) == 1
+    assert calibration_segments[0].text == calibration_text
+    assert FEMININA_PROFILE["max_chars"] == DEFAULT_MAX_CHARS
+    assert FEMININA_PROFILE["silence_seconds"] == 0.22
+    assert FEMININA_PROFILE["min_p"] == 0.114
+    assert FEMININA_PROFILE["seed"] == 20260713
+    assert FEMININA_PROFILE_CALIBRATION["winner_id"] == "minp-0-114-temp-0-80"
+    profile_args = SimpleNamespace(
+        max_chars=FEMININA_PROFILE["max_chars"],
+        silence_seconds=FEMININA_PROFILE["silence_seconds"],
+        exaggeration=FEMININA_PROFILE["exaggeration"],
+        cfg_weight=FEMININA_PROFILE["cfg_weight"],
+        temperature=FEMININA_PROFILE["temperature"],
+        repetition_penalty=FEMININA_PROFILE["repetition_penalty"],
+        min_p=FEMININA_PROFILE["min_p"],
+        top_p=FEMININA_PROFILE["top_p"],
+        seed=FEMININA_PROFILE["seed"],
+    )
+    calibrated_model = FEMININA_PROFILE_CALIBRATION["model"]
+    calibrated_version = FEMININA_PROFILE_CALIBRATION["chatterbox_tts_version"]
+    assert (
+        selected_profile(
+            profile_args,
+            DEFAULT_REFERENCE_VOICE.resolve(),
+            DEFAULT_MODEL_ROOT.resolve(),
+            "cuda",
+            calibrated_model,
+            calibrated_version,
+        )
+        == "feminina-v1"
+    )
+    profile_args.silence_seconds = 0.0
+    assert (
+        selected_profile(
+            profile_args,
+            DEFAULT_REFERENCE_VOICE.resolve(),
+            DEFAULT_MODEL_ROOT.resolve(),
+            "cuda",
+            calibrated_model,
+            calibrated_version,
+        )
+        == "custom"
+    )
+    profile_args.silence_seconds = FEMININA_PROFILE["silence_seconds"]
+    assert (
+        selected_profile(
+            profile_args,
+            DEFAULT_REFERENCE_VOICE.resolve(),
+            DEFAULT_MODEL_ROOT.resolve(),
+            "cpu",
+            calibrated_model,
+            calibrated_version,
+        )
+        == "custom"
+    )
+    altered_model = dict(calibrated_model)
+    altered_model["t3_sha256"] = "0" * 64
+    assert (
+        selected_profile(
+            profile_args,
+            DEFAULT_REFERENCE_VOICE.resolve(),
+            DEFAULT_MODEL_ROOT.resolve(),
+            "cuda",
+            altered_model,
+            calibrated_version,
+        )
+        == "custom"
+    )
+    line_segments = prepare_chatterbox_segments(
+        "Primeira linha completa.\n\nSegunda linha completa.",
+        DEFAULT_MAX_CHARS,
+    )
+    assert [(item.line_number, item.text) for item in line_segments] == [
+        (1, "Primeira linha completa."),
+        (3, "Segunda linha completa."),
+    ]
+    leading_line_segments = prepare_chatterbox_segments(
+        "\n\nPrimeira linha completa.",
+        DEFAULT_MAX_CHARS,
+    )
+    assert leading_line_segments[0].line_number == 3
+    for invalid_text in (
+        "[thoughtful] Texto.",
+        "[thoughtful Texto.",
+        "<emphasis>Texto</emphasis>.",
+        "**Texto.**",
+        "*Texto em itálico.*",
+        "_Texto em itálico_.",
+        "~~Texto riscado~~.",
+        "`Texto em código`.",
+        "# Título.",
+        "> Citação.",
+        "- Item de lista.",
+        "+ Outro item.",
+        "---",
+        "A | B",
+        "O relógio marcou 8 horas.",
+        "Dr. João chegou.",
+        "Visite https://example.com.",
+        "Visite exemplo.com.",
+        "Isso e etc.",
+        "X" * (DEFAULT_MAX_CHARS + 1),
+    ):
+        try:
+            prepare_chatterbox_segments(invalid_text, DEFAULT_MAX_CHARS)
+        except NarratorTextError:
+            pass
+        else:
+            raise AssertionError(f"Expected Chatterbox narrator text to fail: {invalid_text!r}")
 
     with tempfile.TemporaryDirectory(prefix="audiobook-codex-test-") as temporary:
         root = Path(temporary)
@@ -1042,6 +1171,41 @@ def main() -> None:
         audio_manifest_path = image_book_root / "metadata" / "audio-manifest.json"
         audio_manifest = json.loads(audio_manifest_path.read_text(encoding="utf-8"))
         assert audio_manifest["final_audio_sha256"] == sha256_file(compressed_audio)
+        mp3_audio_root = audio_root / "mock" / "mp3"
+        run(
+            str(ROOT / "render_kokoro.py"),
+            "--input-file",
+            str(narrator),
+            "--output-dir",
+            str(mp3_audio_root),
+            "--book-root",
+            str(image_book_root),
+            "--format",
+            "mp3",
+            "--mock",
+            "--overwrite",
+        )
+        mp3_audio = mp3_audio_root / "audiobook.mp3"
+        assert mp3_audio.is_file()
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=sample_rate,channels,bit_rate",
+                "-of",
+                "json",
+                str(mp3_audio),
+            ],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        stream = json.loads(probe.stdout)["streams"][0]
+        assert stream["sample_rate"] == "44100"
+        assert stream["channels"] == 1
+        assert stream["bit_rate"] == "128000"
         run_fails(
             str(ROOT / "publish_artifacts.py"),
             "--book-root",
@@ -1132,6 +1296,48 @@ def main() -> None:
         ]["sha256"] == sha256_file(published_epub)
 
         run(str(ROOT / "render_chatterbox.py"), "--help")
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(image_page_file),
+            "--output-dir",
+            str(audio_root / "chatterbox-invalid-max-chars"),
+            "--standalone",
+            "--max-chars",
+            "321",
+        )
+        invalid_chatterbox_text = image_text_root / "locutor" / "invalid-chatterbox.txt"
+        invalid_chatterbox_text.write_text("[thoughtful] Texto.", encoding="utf-8")
+        invalid_chatterbox_output = audio_root / "chatterbox-invalid-text"
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(invalid_chatterbox_text),
+            "--output-dir",
+            str(invalid_chatterbox_output),
+            "--standalone",
+        )
+        assert not invalid_chatterbox_output.exists()
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(image_page_file),
+            "--output-dir",
+            str(audio_root / "chatterbox-invalid-min-p"),
+            "--standalone",
+            "--min-p",
+            "1.1",
+        )
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(image_page_file),
+            "--output-dir",
+            str(audio_root / "chatterbox-invalid-silence"),
+            "--standalone",
+            "--silence-seconds",
+            "-0.1",
+        )
         chatterbox_invalid_output = audio_root / "chatterbox-invalid"
         run_fails(
             str(ROOT / "render_chatterbox.py"),
@@ -1185,6 +1391,71 @@ def main() -> None:
                 "--standalone",
                 "--format",
                 "m4a",
+            )
+
+        if os.environ.get("CHATTERBOX_REAL_SMOKE") == "1":
+            chatterbox_python = os.environ.get("CHATTERBOX_PYTHON")
+            if not chatterbox_python:
+                raise AssertionError(
+                    "CHATTERBOX_REAL_SMOKE=1 requires CHATTERBOX_PYTHON."
+                )
+            chatterbox_smoke_text = calibration_text
+            chatterbox_smoke_input = root / "chatterbox-cuda-smoke.txt"
+            chatterbox_smoke_input.write_text(chatterbox_smoke_text, encoding="utf-8")
+            chatterbox_smoke_output = root / "chatterbox-cuda-smoke"
+            run_with_python(
+                chatterbox_python,
+                str(ROOT / "render_chatterbox.py"),
+                "--input-file",
+                str(chatterbox_smoke_input),
+                "--output-dir",
+                str(chatterbox_smoke_output),
+                "--standalone",
+                "--device",
+                "cuda",
+                "--format",
+                "wav",
+            )
+            chatterbox_manifest = json.loads(
+                (chatterbox_smoke_output / "audio-manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            chatterbox_segment = (
+                chatterbox_smoke_output / "segments" / "segment-0001.wav"
+            )
+            chatterbox_final_wav = chatterbox_smoke_output / "raw" / "audiobook.wav"
+            chatterbox_final_audio = chatterbox_smoke_output / "audiobook.wav"
+            assert chatterbox_manifest["mock"] is False
+            assert chatterbox_manifest["render_mode"] == "real"
+            assert chatterbox_manifest["engine"] == "chatterbox-multilingual-v3-pt-br"
+            assert chatterbox_manifest["profile"] == "feminina-v1"
+            assert chatterbox_manifest["device"] == "cuda"
+            assert chatterbox_manifest["sample_rate"] == 24000
+            assert len(chatterbox_manifest["segments"]) == 1
+            assert chatterbox_manifest["segments"][0]["locutor_line"] == 1
+            assert (
+                chatterbox_manifest["segments"][0]["character_count"]
+                == len(chatterbox_smoke_text)
+            )
+            assert chatterbox_manifest["segments"][0]["warnings"] == [
+                "uses punctuation normalized by Chatterbox"
+            ]
+            assert chatterbox_manifest["duration_seconds"] > 0
+            assert chatterbox_segment.is_file() and chatterbox_segment.stat().st_size > 44
+            assert chatterbox_final_wav.is_file()
+            assert chatterbox_final_audio.is_file()
+            assert (
+                chatterbox_manifest["final_wav_sha256"]
+                == sha256_file(chatterbox_final_wav)
+            )
+            assert (
+                chatterbox_manifest["final_wav_sha256"]
+                == FEMININA_PROFILE_CALIBRATION["main_prompt_wav_sha256"]
+            )
+            assert (
+                chatterbox_manifest["final_audio_sha256"]
+                == sha256_file(chatterbox_final_audio)
             )
 
     print("Audiobook Codex script tests passed.")

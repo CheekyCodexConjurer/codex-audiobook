@@ -18,7 +18,7 @@ Use a bounded swarm only when it reduces elapsed time without weakening fidelity
 - Merge and validate after every batch.
 - Use at most one Computer Use worker at a time.
 - Use at most one native image restoration worker at a time. It may inspect and create only an assigned candidate file; it cannot approve or publish it.
-- Keep Kokoro and Chatterbox rendering serial unless the runtime is explicitly proven safe for concurrent inference.
+- Keep Chatterbox rendering serial unless the runtime is explicitly proven safe for concurrent inference.
 
 ## Gates
 

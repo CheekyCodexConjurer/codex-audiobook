@@ -2,9 +2,9 @@
 
 This repository owns the native-only audiobook workflow.
 
-- Use `$audiobook-codex` for PDF and EPUB mapping, asset inventory, faithful transcription, semantic EPUB export, narrator text, and local Kokoro or Chatterbox PT-BR rendering.
+- Use `$audiobook-codex` for PDF and EPUB mapping, asset inventory, faithful transcription, semantic EPUB export, narrator text, and local Chatterbox PT-BR rendering.
 - Store book artifacts under `E:\Pessoal\e-books`, never inside this Git repository.
-- Use only Codex, native tools, the PDF plugin, optional Computer Use, and local Kokoro or Chatterbox. Do not use browser chat UI, external OCR, external LLMs, or hosted TTS.
+- Use only Codex, native tools, the PDF plugin, optional Computer Use, and local Chatterbox. Do not use browser chat UI, external OCR, external LLMs, or hosted TTS.
 - Keep `text/source` immutable and create speech changes only in `text/locutor`.
 - Keep original source renders and extracted assets immutable. Restored images are optional reviewed derivatives and never transcription evidence.
 - Use the installed `audiobook-structure`, `audiobook-transcriber`, and `audiobook-verifier` roles when delegation improves coverage.

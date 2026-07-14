@@ -2,7 +2,7 @@
 
 Native-only audiobook workflow for Codex. It maps PDF or EPUB sources, inventories original
 visual assets, produces faithful source text, derives PT-BR narrator text, exports semantic EPUB
-editions, and renders local Kokoro or Chatterbox PT-BR audio.
+editions, and renders local Chatterbox PT-BR audio.
 
 Open `E:\Repositories\codex-audiobook` in Codex before processing a book. Attach the PDF or EPUB
 to the task, then use the AHK shortcuts with Scroll Lock enabled. The generic
@@ -43,7 +43,7 @@ E:\Pessoal\e-books\<book>\
 |- audio\
 |- restoration\
 |- exports\epub\
-|- <book>-audiobook.m4a
+|- <book>-audiobook.mp3
 `- <book>-fiel-classico.epub
 ```
 
@@ -56,7 +56,7 @@ NUM0+2 $codex-workflows mode=IMPL.PHASE approved-roadmap goal-managed phased par
 NUM0+3 $codex-workflows mode=RESEARCH.DEEP scope{web|github|repo?} no-edits fanout=adaptive evidence{primary|official|repo} synthesize{solution|roadmap} topic:
 NUM0+7 $audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\Pessoal\e-books} output{book-map.json|assets-manifest.json} visual-fallback{pdf|computer} swarm{bounded}
 NUM0+8 $audiobook-codex stage=TRANSCRIBE native-only input{book-map.json|assets-manifest.json} output{text/source|epub-manifest.json} fidelity=strict ledger=required epub-profile{antique-paper}
-NUM0+9 $audiobook-codex stage=RENDER native-only input{text/source|epub-manifest.json} output{text/locutor|audio|epub|publish-root} tts{kokoro|chatterbox-pt-br} language=pt-BR epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required
+NUM0+9 $audiobook-codex stage=RENDER native-only input{text/source|epub-manifest.json} output{text/locutor|audio|epub|publish-root} tts{chatterbox-pt-br} voice-profile{feminina-v1} locutor{line-delimited-v1|max=320} language=pt-BR epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required
 ```
 
 `NUM0+9` produces the canonical EPUB from verified `text/source` and original assets.
@@ -75,12 +75,11 @@ visual approval for every generated derivative.
 .\scripts\validate.ps1
 ```
 
-For a real Kokoro smoke run:
+Before shipping a Chatterbox renderer or `feminina-v1` change, also run the CUDA
+reproducibility gate:
 
 ```powershell
-$env:KOKORO_PYTHON = "$env:KOKORO_ROOT\venv\Scripts\python.exe"
-$env:KOKORO_REAL_SMOKE = '1'
-.\scripts\validate.ps1
+.\scripts\validate.ps1 -ChatterboxSmoke
 ```
 
 ## Chatterbox PT-BR
@@ -94,7 +93,14 @@ E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe
 It uses the locally downloaded `ResembleAI/Chatterbox-Multilingual-pt-br` V3 model
 and the bundled reference voice
 `plugins\audiobook-codex\assets\voices\Feminina.mp3`. Render it through that virtual
-environment, then publish the final artifacts:
+environment, then publish the final artifacts. The default `feminina-v1` profile fixes
+the calibrated seed, sampling parameters, `min_p=0.114`, and a 0.22-second inter-line
+silence. It is selected against the three-prompt calibration corpus and verifies the
+bundled voice hash before naming a render `feminina-v1`. Its narrator input is one
+complete spoken locution per non-empty line, with a 320-character maximum; the renderer
+rejects digits, common abbreviations, URLs, email addresses, and bracketed audio markup.
+The Chatterbox process forces Hugging Face and Transformers offline so missing local
+assets fail instead of being fetched.
 
 ```powershell
 $book = 'E:\Pessoal\e-books\O-Espiritismo-A-magia-e-as-sete-linhas-de-umbanda'
@@ -104,10 +110,10 @@ $python = 'E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe'
   --book-root $book `
   --input-file "$book\text\locutor\book.txt" `
   --output-dir "$book\audio\chatterbox-pt-br" `
-  --format m4a
+  --format mp3
 
 python .\plugins\audiobook-codex\scripts\publish_artifacts.py `
   --book-root $book `
-  --audio "$book\audio\chatterbox-pt-br\audiobook.m4a" `
+  --audio "$book\audio\chatterbox-pt-br\audiobook.mp3" `
   --epub "$book\exports\epub\<book>-fiel-classico.epub"
 ```

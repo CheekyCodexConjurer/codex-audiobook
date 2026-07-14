@@ -1,6 +1,6 @@
 ---
 name: audiobook-codex
-description: Build a local audiobook and semantic EPUB from a PDF or EPUB using only Codex, native tools, Codex agents, the PDF plugin, optional Computer Use, native image editing, and local Kokoro or Chatterbox PT-BR runtimes. Use for book mapping, asset inventory, faithful source transcription, PT-BR narrator text, EPUB export, optional reviewed image restoration, and local audiobook audio without third-party OCR or external LLMs.
+description: Build a local audiobook and semantic EPUB from a PDF or EPUB using only Codex, native tools, Codex agents, the PDF plugin, optional Computer Use, native image editing, and the local Chatterbox PT-BR runtime. Use for book mapping, asset inventory, faithful source transcription, PT-BR narrator text, EPUB export, optional reviewed image restoration, and local audiobook audio without third-party OCR or external LLMs.
 ---
 
 # Audiobook Codex
@@ -50,7 +50,7 @@ For a source already in Portuguese, faithful text is PT-BR only to the extent th
 1. Derive `text/locutor` from verified `text/source`.
 2. Write `metadata/narrator-changes.json` for every allowed narrator transformation.
 3. Validate that every narrator segment references a verified source segment.
-4. Run `scripts/render_kokoro.py` through the Python environment that contains Kokoro, or run `scripts/render_chatterbox.py` through the dedicated Chatterbox PT-BR environment when the approved local reference voice is required. Both write segment audio, a final WAV or compressed file, and `metadata/audio-manifest.json`.
+4. Run `scripts/render_chatterbox.py` through the dedicated Chatterbox PT-BR environment. Use the default `feminina-v1` profile, which writes segment audio, a final WAV and MP3 delivery file, and `metadata/audio-manifest.json`.
 5. Keep source hashes, narrator hashes, voice, speed, segment hashes, and durations in the manifest. Re-render only segments whose narrator hash changed.
 6. The default `antique-paper` EPUB profile embeds IM FELL English with its OFL license, uses the fixed warm paper palette, and generates a local editorial cover from verified title, subtitle, author, place, and year. It never replaces the source cover/title page.
 7. Run `scripts/export_epub.py` with `--image-edition original` to create the canonical semantic EPUB from `text/source`, verified manifests, and extracted original assets.
@@ -66,7 +66,7 @@ For a source already in Portuguese, faithful text is PT-BR only to the extent th
 - Computer Use: one agent only, serially, when native rendering cannot resolve a visual ambiguity.
 - Native image restoration: use the built-in `image_gen` tool, not an API-key script or browser chat. Load a local edit target into the task first, restate every invariant in the prompt, and require a human approval record before export.
 - Printed text and handwriting: use only original assets or deterministic local cleanup. Do not use generated output as a source for transcription or semantic EPUB text.
-- Chatterbox PT-BR: use `E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe`, the local V3 PT-BR model files, and the bundled `assets/voices/Feminina.mp3` reference. Do not send the voice reference or narrator text to a hosted TTS service.
+- Chatterbox PT-BR: use `E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe`, the local V3 PT-BR model files, and the bundled `assets/voices/Feminina.mp3` reference. The official render profile is `feminina-v1`; use line-delimited narrator text of at most 320 characters per non-empty line. Do not send the voice reference or narrator text to a hosted TTS service.
 - When installed, use `audiobook-structure`, `audiobook-transcriber`, and `audiobook-verifier` for the matching swarm roles. Otherwise use equivalent bounded roles with the same write boundaries.
 
 ## Validation
@@ -80,9 +80,8 @@ python scripts/verify_text_ledger.py --book-map <book-map.json> --ledger <text-l
 python scripts/build_epub_manifest.py --book-map <book-map.json> --ledger <text-ledger.json> --assets-manifest <assets-manifest.json> --text-root <text-root> --visual-profile antique-paper
 python scripts/export_epub.py --book-root <book-root> --image-edition original
 python scripts/validate_epub_export.py --book-root <book-root> --epub <output.epub> --image-edition original
-python scripts/render_kokoro.py --book-root <book-root> --input-file <locutor.txt> --output-dir <audio-dir> --voice pm_alex --format m4a
-E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe scripts/render_chatterbox.py --book-root <book-root> --input-file <locutor.txt> --output-dir <audio-dir> --format m4a
-python scripts/publish_artifacts.py --book-root <book-root> --audio <audio-dir>\audiobook.m4a --epub <output.epub>
+E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe scripts/render_chatterbox.py --book-root <book-root> --input-file <locutor.txt> --output-dir <audio-dir> --format mp3
+python scripts/publish_artifacts.py --book-root <book-root> --audio <audio-dir>\audiobook.mp3 --epub <output.epub>
 ```
 
 Use `--mock` only for validation. Never publish mock audio.

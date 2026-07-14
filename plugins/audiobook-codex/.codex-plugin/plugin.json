@@ -1,7 +1,7 @@
 {
   "name": "audiobook-codex",
-  "version": "0.3.0+codex.20260713200810",
-  "description": "Native-only Codex workflow for mapping books, preserving visual assets, producing faithful text, exporting EPUB editions, and rendering local Kokoro or Chatterbox PT-BR audiobooks.",
+  "version": "0.3.0+codex.20260714163729",
+  "description": "Native-only Codex workflow for mapping books, preserving visual assets, producing faithful text, exporting EPUB editions, and rendering local Chatterbox PT-BR audiobooks.",
   "author": {
     "name": "Matheus"
   },
@@ -9,7 +9,7 @@
   "interface": {
     "displayName": "Audiobook Codex",
     "shortDescription": "Map books, preserve assets, export EPUB, and render local audio.",
-    "longDescription": "A Codex-only audiobook workflow for PDF and EPUB sources. It uses native PDF and Computer Use capabilities when available, Codex agents for visual transcription and asset review, native image editing for opt-in reviewed derivatives, semantic EPUB packaging, and local Kokoro or Chatterbox PT-BR audio.",
+    "longDescription": "A Codex-only audiobook workflow for PDF and EPUB sources. It uses native PDF and Computer Use capabilities when available, Codex agents for visual transcription and asset review, native image editing for opt-in reviewed derivatives, semantic EPUB packaging, and local Chatterbox PT-BR audio.",
     "developerName": "Matheus",
     "category": "Productivity",
     "capabilities": [],

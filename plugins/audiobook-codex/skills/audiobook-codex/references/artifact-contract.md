@@ -33,7 +33,7 @@ book/
 |  `- chapters/
 |- exports/
 |  `- epub/
-|- <book>-audiobook.m4a
+|- <book>-audiobook.mp3
 `- <book>-fiel-classico.epub
 ```
 
@@ -264,7 +264,11 @@ For each segment, record source and narrator hashes, voice, speed, output path, 
 
 `metadata/audio-manifest.json` is canonical even though the wave segments and final
 audio stay under `audio/`. A Chatterbox PT-BR render additionally records model hashes,
-CUDA/CPU device, and reference-voice SHA-256.
+CUDA/CPU device, reference-voice SHA-256, the resolved profile, renderer hash, installed
+Chatterbox package version, line-delimited narrator policy, and inter-segment silence.
+An official profile additionally records the hash-pinned calibration selection that chose
+it. Each Chatterbox segment records its locutor line, character count, and any punctuation
+or acronym review warnings produced by that policy.
 
 ## Publication Manifest
 

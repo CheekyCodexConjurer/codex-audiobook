@@ -80,6 +80,7 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "validate_epub_export.py",
         "render_kokoro.py",
         "render_chatterbox.py",
+        "chatterbox_text.py",
         "publish_artifacts.py",
         "test_tools.py",
     ):

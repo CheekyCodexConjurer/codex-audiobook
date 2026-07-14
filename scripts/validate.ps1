@@ -1,3 +1,7 @@
+param(
+    [switch]$ChatterboxSmoke
+)
+
 $ErrorActionPreference = 'Stop'
 
 $repo = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
@@ -9,11 +13,23 @@ $installer = Join-Path $repo 'scripts\install.ps1'
 $ahkExe = 'E:\Programs\AHK\v2\AutoHotkey64.exe'
 $workflowSkill = 'C:\Users\mathe\.agents\skills\codex-workflows\SKILL.md'
 $runtimePython = 'C:\Users\mathe\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$chatterboxPython = if ($env:CHATTERBOX_PYTHON) {
+    $env:CHATTERBOX_PYTHON
+} else {
+    'E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe'
+}
 $pluginCreator = 'C:\Users\mathe\.codex\skills\.system\plugin-creator'
 $skillCreator = 'C:\Users\mathe\.codex\skills\.system\skill-creator'
 
 if (!(Test-Path $runtimePython)) {
     $runtimePython = (Get-Command python -ErrorAction Stop).Source
+}
+if ($ChatterboxSmoke) {
+    if (!(Test-Path $chatterboxPython)) {
+        throw "Chatterbox CUDA smoke runtime not found: $chatterboxPython"
+    }
+    $env:CHATTERBOX_REAL_SMOKE = '1'
+    $env:CHATTERBOX_PYTHON = $chatterboxPython
 }
 
 foreach ($profile in 'audiobook-structure.toml', 'audiobook-transcriber.toml', 'audiobook-verifier.toml') {
@@ -33,7 +49,7 @@ $bindings = @(
     'Numpad0 & Numpad3::PastePrompt("$codex-workflows mode=RESEARCH.DEEP scope{web|github|repo?} no-edits fanout=adaptive evidence{primary|official|repo} synthesize{solution|roadmap} topic: ")',
     'Numpad0 & Numpad7::PastePrompt("$audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\Pessoal\e-books} output{book-map.json|assets-manifest.json} visual-fallback{pdf|computer} swarm{bounded}")',
     'Numpad0 & Numpad8::PastePrompt("$audiobook-codex stage=TRANSCRIBE native-only input{book-map.json|assets-manifest.json} output{text/source|epub-manifest.json} fidelity=strict ledger=required epub-profile{antique-paper}")',
-    'Numpad0 & Numpad9::PastePrompt("$audiobook-codex stage=RENDER native-only input{text/source|epub-manifest.json} output{text/locutor|audio|epub|publish-root} tts{kokoro|chatterbox-pt-br} language=pt-BR epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required")'
+    'Numpad0 & Numpad9::PastePrompt("$audiobook-codex stage=RENDER native-only input{text/source|epub-manifest.json} output{text/locutor|audio|epub|publish-root} tts{chatterbox-pt-br} voice-profile{feminina-v1} locutor{line-delimited-v1|max=320} language=pt-BR epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required")'
 )
 $mapPrompt = '$audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\Pessoal\e-books} output{book-map.json|assets-manifest.json} visual-fallback{pdf|computer} swarm{bounded}'
 

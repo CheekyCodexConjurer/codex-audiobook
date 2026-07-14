@@ -149,9 +149,13 @@ def transcode(final_wav: Path, output_path: Path, audio_format: str) -> None:
     executable = shutil.which("ffmpeg")
     if not executable:
         raise RuntimeError("ffmpeg was not found on PATH.")
-    codec = "aac" if audio_format == "m4a" else "libmp3lame"
+    command = [executable, "-y", "-i", str(final_wav), "-vn", "-ac", "1"]
+    if audio_format == "m4a":
+        command.extend(("-c:a", "aac"))
+    else:
+        command.extend(("-ar", "44100", "-c:a", "libmp3lame", "-b:a", "128k"))
     completed = subprocess.run(
-        [executable, "-y", "-i", str(final_wav), "-vn", "-c:a", codec, str(output_path)],
+        [*command, str(output_path)],
         text=True,
         capture_output=True,
     )
