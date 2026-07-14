@@ -13,6 +13,9 @@ import sys
 import unicodedata
 
 
+CHATTERBOX_ENGINE = "chatterbox-multilingual-v3-pt-br"
+
+
 @dataclass(frozen=True)
 class Publication:
     kind: str
@@ -98,6 +101,8 @@ def require_real_audio_manifest(book_root: Path, source: Path) -> tuple[Path, di
         raise RuntimeError("audio-manifest.json must be a JSON object")
     if manifest.get("mock") is True or manifest.get("render_mode") != "real":
         raise RuntimeError("Refusing to publish mock or non-final audio")
+    if manifest.get("engine") != CHATTERBOX_ENGINE:
+        raise RuntimeError("Refusing audio not rendered by Chatterbox PT-BR")
     require_under(source, book_root / "audio", "Audio source")
     try:
         source.relative_to((book_root / "audio" / "mock").resolve())

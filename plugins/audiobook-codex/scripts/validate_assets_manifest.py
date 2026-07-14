@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sys
 
+from path_safety import resolve_under
+
 
 ASSET_FORMATS = {"pdf", "epub"}
 TEXT_PIXEL_STATES = {"none", "printed", "handwriting", "mixed", "unknown"}
@@ -51,17 +53,6 @@ def is_sha256(value: object) -> bool:
     except ValueError:
         return False
     return True
-
-
-def resolve_under(root: Path, raw_path: object) -> Path | None:
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        return None
-    target = (root / raw_path).resolve()
-    try:
-        target.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return target
 
 
 def require_text(value: object) -> bool:
@@ -144,11 +135,15 @@ def validate_assets_manifest(
             errors.append(f"{label}.original must be an object")
         else:
             original_path = original.get("path")
-            target = resolve_under(book_root, original_path)
+            target = resolve_under(
+                book_root,
+                original_path,
+                (Path("assets") / "images" / "original",),
+            )
             if target is None:
-                errors.append(f"{label}.original.path escapes the book root: {original_path}")
-            elif not str(original_path).replace("\\", "/").startswith("assets/images/original/"):
-                errors.append(f"{label}.original.path must be under assets/images/original/")
+                errors.append(
+                    f"{label}.original.path must resolve under assets/images/original/: {original_path}"
+                )
             elif check_files:
                 if not target.is_file():
                     errors.append(f"{label}.original.path is missing: {original_path}")
@@ -218,11 +213,15 @@ def validate_assets_manifest(
             errors.append(f"{label}.restoration.approved must be an object when status is approved")
             continue
         approved_path = approved.get("path")
-        target = resolve_under(book_root, approved_path)
+        target = resolve_under(
+            book_root,
+            approved_path,
+            (Path("restoration") / "approved",),
+        )
         if target is None:
-            errors.append(f"{label}.restoration.approved.path escapes the book root: {approved_path}")
-        elif not str(approved_path).replace("\\", "/").startswith("restoration/approved/"):
-            errors.append(f"{label}.restoration.approved.path must be under restoration/approved/")
+            errors.append(
+                f"{label}.restoration.approved.path must resolve under restoration/approved/: {approved_path}"
+            )
         elif check_files:
             if not target.is_file():
                 errors.append(f"{label}.restoration.approved.path is missing: {approved_path}")

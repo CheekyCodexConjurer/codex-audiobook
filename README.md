@@ -82,6 +82,19 @@ reproducibility gate:
 .\scripts\validate.ps1 -ChatterboxSmoke
 ```
 
+## Voice Calibration
+
+Use `$voice-calibration` before changing the local voice reference, a local TTS
+engine, or an official narrator profile. It creates a dedicated external workspace,
+freezes the three-prompt PT-BR corpus and manually imported target audio with hashes,
+then requires cross-prompt ranking, listening review, DSP comparison, and a production
+smoke render before promotion.
+
+The current decision is documented in
+[`docs/voice-calibration/feminina-v1.md`](docs/voice-calibration/feminina-v1.md).
+No separate AHK shortcut is registered: `NUM0+9` remains the production render route
+for the already approved `feminina-v1` profile.
+
 ## Chatterbox PT-BR
 
 The dedicated local runtime is installed at:

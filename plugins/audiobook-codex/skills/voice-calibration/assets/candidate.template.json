@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "adapter_id": "local-tts-id",
+  "shared": {
+    "seed": 1234
+  },
+  "candidates": [
+    {
+      "id": "baseline",
+      "parameters": {}
+    },
+    {
+      "id": "candidate-01",
+      "parameters": {
+        "parameter_name": 0.0
+      }
+    }
+  ]
+}

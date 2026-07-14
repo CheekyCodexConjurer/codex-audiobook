@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sys
 
+from path_safety import resolve_under
+
 
 LEDGER_STATES = {"verified", "blank", "excluded"}
 
@@ -23,17 +25,6 @@ def load_json(path: Path) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Cannot read JSON {path}: {error}") from error
-
-
-def resolve_under(root: Path, raw_path: object) -> Path | None:
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        return None
-    target = (root / raw_path).resolve()
-    try:
-        target.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return target
 
 
 def page_requires_text(page: dict) -> bool:
@@ -129,16 +120,22 @@ def verify_chapter_outputs(
             ids.add(output_id)
 
         relative_path = entry.get("source_file")
-        source_file = resolve_under(text_root, relative_path)
-        normalized_path = str(relative_path).replace("\\", "/") if isinstance(relative_path, str) else ""
+        source_file = resolve_under(
+            text_root,
+            relative_path,
+            (Path("source") / "chapters", Path("source") / "book.txt"),
+        )
+        chapters_root = (text_root / "source" / "chapters").resolve()
+        book_file = (text_root / "source" / "book.txt").resolve()
         if source_file is None or not (
-            normalized_path.startswith("source/chapters/") or normalized_path == "source/book.txt"
+            source_file == book_file or source_file.is_relative_to(chapters_root)
         ):
             errors.append(f"{label}.source_file must resolve under source/chapters or source/book.txt")
         elif not source_file.is_file() or not source_file.read_text(encoding="utf-8").strip():
             errors.append(f"{label}.source_file is missing or empty: {relative_path}")
         elif entry.get("source_sha256") != sha256_file(source_file):
             errors.append(f"{label}.source_sha256 does not match source_file")
+        normalized_path = str(relative_path).replace("\\", "/") if isinstance(relative_path, str) else ""
         if isinstance(output_id, str) and output_id in expected and normalized_path != expected[output_id]:
             errors.append(
                 f"{label}.source_file does not match the expected source TXT for {output_id}"
@@ -301,9 +298,15 @@ def verify(
         if not isinstance(relative_path, str) or not relative_path.strip():
             errors.append(f"logical page {logical_page} needs source_file")
             continue
-        source_file = resolve_under(text_root, relative_path)
+        source_file = resolve_under(
+            text_root,
+            relative_path,
+            (Path("source") / "pages",),
+        )
         if source_file is None:
-            errors.append(f"logical page {logical_page} source path escapes text root: {relative_path}")
+            errors.append(
+                f"logical page {logical_page} source path must resolve under source/pages: {relative_path}"
+            )
             continue
         if not source_file.is_file():
             errors.append(f"logical page {logical_page} source file is missing: {relative_path}")
@@ -322,9 +325,15 @@ def verify(
             if not isinstance(locutor_path, str) or not locutor_path.strip():
                 errors.append(f"logical page {logical_page} needs locutor_file")
                 continue
-            locutor_file = resolve_under(text_root, locutor_path)
+            locutor_file = resolve_under(
+                text_root,
+                locutor_path,
+                (Path("locutor"),),
+            )
             if locutor_file is None:
-                errors.append(f"logical page {logical_page} locutor path escapes text root: {locutor_path}")
+                errors.append(
+                    f"logical page {logical_page} locutor path must resolve under locutor: {locutor_path}"
+                )
                 continue
             if not locutor_file.is_file() or not locutor_file.read_text(encoding="utf-8").strip():
                 errors.append(f"logical page {logical_page} locutor file is missing or empty")

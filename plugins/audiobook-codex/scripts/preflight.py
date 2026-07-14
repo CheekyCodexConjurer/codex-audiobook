@@ -154,9 +154,13 @@ def resolve_pdftoppm() -> str:
         return str(wrapper)
 
     for ancestor in wrapper.parents:
-        direct_executable = ancestor / "native" / "poppler" / "Library" / "bin" / "pdftoppm.exe"
-        if direct_executable.is_file():
-            return str(direct_executable)
+        for relative_path in (
+            Path("native") / "poppler" / "Library" / "bin" / "pdftoppm.exe",
+            Path("native") / "poppler" / "bin" / "pdftoppm.exe",
+        ):
+            direct_executable = ancestor / relative_path
+            if direct_executable.is_file():
+                return str(direct_executable)
     return str(wrapper)
 
 

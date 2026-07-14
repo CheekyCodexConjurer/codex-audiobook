@@ -68,6 +68,78 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
             if not (skill_root / relative_path).is_file():
                 errors.append(f"audiobook skill is missing {relative_path}")
 
+    calibration_root = plugin_root / "skills" / "voice-calibration"
+    calibration_skill = calibration_root / "SKILL.md"
+    if not calibration_skill.is_file():
+        errors.append("voice-calibration skill is missing SKILL.md")
+    else:
+        calibration_text = calibration_skill.read_text(encoding="utf-8")
+        if not re.match(
+            r"^---\r?\nname:\s*voice-calibration\r?\ndescription:\s*.+?\r?\n---\r?\n",
+            calibration_text,
+            re.DOTALL,
+        ):
+            errors.append("voice-calibration skill frontmatter is invalid")
+        if "[TODO:" in calibration_text:
+            errors.append("voice-calibration skill contains a TODO placeholder")
+        for relative_path in (
+            "agents/openai.yaml",
+            "references/protocol.md",
+            "references/evidence-contract.md",
+            "references/tts-adapter-contract.md",
+            "references/chatterbox-v3-pt-br.md",
+            "assets/corpus.template.json",
+            "assets/candidate.template.json",
+            "assets/adapter.template.json",
+            "assets/promotion.template.json",
+            "assets/report.template.md",
+            "scripts/calibration_workspace.py",
+            "scripts/init_calibration_workspace.py",
+            "scripts/import_calibration_targets.py",
+            "scripts/validate_calibration_workspace.py",
+            "scripts/test_voice_calibration.py",
+        ):
+            if not (calibration_root / relative_path).is_file():
+                errors.append(f"voice-calibration skill is missing {relative_path}")
+        agent_metadata = calibration_root / "agents" / "openai.yaml"
+        if agent_metadata.is_file():
+            agent_text = agent_metadata.read_text(encoding="utf-8")
+            display_name = re.search(r'(?m)^\s*display_name:\s*"([^"]+)"\s*$', agent_text)
+            short_description = re.search(
+                r'(?m)^\s*short_description:\s*"([^"]+)"\s*$',
+                agent_text,
+            )
+            default_prompt = re.search(
+                r'(?m)^\s*default_prompt:\s*"([^"]+)"\s*$',
+                agent_text,
+            )
+            if display_name is None or not display_name.group(1).strip():
+                errors.append("voice-calibration agent display_name must be non-empty")
+            if (
+                short_description is None
+                or not 25 <= len(short_description.group(1)) <= 64
+            ):
+                errors.append(
+                    "voice-calibration agent short_description must be 25-64 characters"
+                )
+            if (
+                default_prompt is None
+                or "$voice-calibration" not in default_prompt.group(1)
+            ):
+                errors.append(
+                    "voice-calibration agent default_prompt must invoke $voice-calibration"
+                )
+        for relative_path in (
+            "assets/corpus.template.json",
+            "assets/candidate.template.json",
+            "assets/adapter.template.json",
+            "assets/promotion.template.json",
+        ):
+            try:
+                load_json(calibration_root / relative_path)
+            except RuntimeError as error:
+                errors.append(str(error))
+
     for filename in (
         "preflight.py",
         "asset_inventory.py",
@@ -78,7 +150,8 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "epub_presentation.py",
         "export_epub.py",
         "validate_epub_export.py",
-        "render_kokoro.py",
+        "path_safety.py",
+        "audio_tools.py",
         "render_chatterbox.py",
         "chatterbox_text.py",
         "publish_artifacts.py",

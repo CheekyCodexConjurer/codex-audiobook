@@ -3,6 +3,7 @@
 This repository owns the native-only audiobook workflow.
 
 - Use `$audiobook-codex` for PDF and EPUB mapping, asset inventory, faithful transcription, semantic EPUB export, narrator text, and local Chatterbox PT-BR rendering.
+- Use `$voice-calibration` before adding or replacing a local voice reference, TTS engine, or official narrator profile. Calibration artifacts belong under `E:\Pessoal\e-books\_voice-calibration-<profile-id>` and must not replace a production profile without immutable evidence, cross-prompt selection, listening review, and a reproducible smoke render.
 - Store book artifacts under `E:\Pessoal\e-books`, never inside this Git repository.
 - Use only Codex, native tools, the PDF plugin, optional Computer Use, and local Chatterbox. Do not use browser chat UI, external OCR, external LLMs, or hosted TTS.
 - Keep `text/source` immutable and create speech changes only in `text/locutor`.

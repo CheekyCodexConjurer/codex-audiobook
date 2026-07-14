@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "id": "local-tts-id",
+  "engine": "local-tts-engine",
+  "model": {
+    "id": "local-model-id",
+    "files": []
+  },
+  "runtime": {
+    "executable": "<absolute-local-path>",
+    "version": "<version>",
+    "device": "cuda"
+  },
+  "text_policy": {
+    "name": "line-delimited-v1",
+    "max_chars": 320
+  },
+  "parameters": {
+    "seed": {
+      "type": "integer",
+      "deterministic": false
+    }
+  },
+  "output": {
+    "format": "wav",
+    "sample_rate": 24000,
+    "channels": 1
+  },
+  "smoke": {
+    "command": "<standalone render command>",
+    "input": "<immutable prompt path>"
+  }
+}

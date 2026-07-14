@@ -9,6 +9,10 @@ Use this skill as a three-stage pipeline. Keep the source artifact, visual asset
 
 Read [artifact-contract.md](references/artifact-contract.md) before any stage. Read [swarm-protocol.md](references/swarm-protocol.md) when delegating. Read [narrator-policy.md](references/narrator-policy.md) before creating narrator text.
 
+Before adding or replacing a local voice reference, TTS engine, or official narrator
+profile, use `$voice-calibration`. Do not calibrate against hosted TTS from this
+pipeline and do not alter `feminina-v1` without its separate promotion evidence.
+
 ## Non-Negotiable Rules
 
 - Use no third-party OCR service, external LLM, browser chat UI, or hosted TTS.

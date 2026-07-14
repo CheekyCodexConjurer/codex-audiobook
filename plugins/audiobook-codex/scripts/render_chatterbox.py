@@ -16,7 +16,7 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 from chatterbox_text import DEFAULT_MAX_CHARS, prepare_chatterbox_segments
-from render_kokoro import (
+from audio_tools import (
     CHANNELS,
     SAMPLE_RATE,
     SAMPLE_WIDTH,

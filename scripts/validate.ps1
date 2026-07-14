@@ -7,6 +7,8 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $plugin = Join-Path $repo 'plugins\audiobook-codex'
 $skill = Join-Path $plugin 'skills\audiobook-codex'
+$voiceCalibrationSkill = Join-Path $plugin 'skills\voice-calibration'
+$voiceCalibrationReport = Join-Path $repo 'docs\voice-calibration\feminina-v1.md'
 $marketplace = Join-Path $repo '.agents\plugins\marketplace.json'
 $ahk = Join-Path $repo 'ahk\codex_audiobook.ahk'
 $installer = Join-Path $repo 'scripts\install.ps1'
@@ -41,6 +43,11 @@ foreach ($profile in 'audiobook-structure.toml', 'audiobook-transcriber.toml', '
 }
 
 $readme = Get-Content -Raw (Join-Path $repo 'README.md')
+$voiceCalibrationReportText = if (Test-Path $voiceCalibrationReport) {
+    Get-Content -Raw $voiceCalibrationReport
+} else {
+    throw "Missing voice-calibration report: $voiceCalibrationReport"
+}
 $ahkText = Get-Content -Raw $ahk
 $bindings = @(
     'Numpad0::PastePrompt("$codex-workflows mode=PLAN.AUTO no-edits route{PLAN|P.DEEP} earned-rework? parallel-ready?")',
@@ -70,6 +77,14 @@ if ($ahkText -match '(?m)^ScrollLock::') {
 if ($readme -notmatch [regex]::Escape('NUM0+7 ' + $mapPrompt)) {
     throw 'README.md does not document the NUM0+7 audiobook map binding.'
 }
+if ($readme -notmatch [regex]::Escape('docs/voice-calibration/feminina-v1.md')) {
+    throw 'README.md does not link the feminina-v1 calibration report.'
+}
+foreach ($expected in 'feminina-v1', '0.615687', 'min_p: 0.114', '5c9e0f38e679c03b99ca0c01318f0a668d47f14e453510a89dcad927d416471b') {
+    if ($voiceCalibrationReportText -notmatch [regex]::Escape($expected)) {
+        throw "Voice-calibration report is missing expected evidence: $expected"
+    }
+}
 try {
     [scriptblock]::Create((Get-Content -Raw $installer)) | Out-Null
 } catch {
@@ -86,11 +101,21 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Audiobook plugin script validation failed.'
 }
 
+& $runtimePython -B (Join-Path $voiceCalibrationSkill 'scripts\test_voice_calibration.py')
+if ($LASTEXITCODE -ne 0) {
+    throw 'Voice-calibration skill script validation failed.'
+}
+
 $yamlAvailable = ((& $runtimePython -c "import importlib.util; print('1' if importlib.util.find_spec('yaml') else '0')").Trim() -eq '1')
 if ($yamlAvailable) {
     & $runtimePython (Join-Path $skillCreator 'scripts\quick_validate.py') $skill
     if ($LASTEXITCODE -ne 0) {
         throw 'Audiobook skill validation failed.'
+    }
+
+    & $runtimePython (Join-Path $skillCreator 'scripts\quick_validate.py') $voiceCalibrationSkill
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Voice-calibration skill validation failed.'
     }
 
     & $runtimePython (Join-Path $pluginCreator 'scripts\validate_plugin.py') $plugin

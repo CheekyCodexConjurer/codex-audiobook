@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 import sys
 
+from path_safety import resolve_under
+
 
 READY_STATES = {"ready", "approved"}
 PAGE_STATES = {"needs_analysis", "mapped", "verified", "blank", "excluded"}
@@ -28,23 +30,22 @@ def require_text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def is_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        int(value, 16)
+    except ValueError:
+        return False
+    return True
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-def resolve_under(root: Path, raw_path: object) -> Path | None:
-    if not isinstance(raw_path, str) or not raw_path.strip():
-        return None
-    target = (root / raw_path).resolve()
-    try:
-        target.relative_to(root.resolve())
-    except ValueError:
-        return None
-    return target
 
 
 def validate_book_map(book_map: object, root: Path, require_ready: bool, check_files: bool) -> list[str]:
@@ -58,14 +59,28 @@ def validate_book_map(book_map: object, root: Path, require_ready: bool, check_f
     if not isinstance(source, dict):
         errors.append("source must be an object")
         source = {}
-    if source.get("format") not in FORMATS:
+    source_format = source.get("format")
+    valid_source_format = isinstance(source_format, str) and source_format in FORMATS
+    if not valid_source_format:
         errors.append("source.format must be pdf or epub")
-    if not require_text(source.get("sha256")) or len(str(source.get("sha256"))) != 64:
+    if not is_sha256(source.get("sha256")):
         errors.append("source.sha256 must be a SHA-256 hex string")
     source_path = source.get("path")
-    stored_source = resolve_under(root, source_path)
-    if stored_source is None:
-        errors.append(f"source.path must resolve inside the book root: {source_path}")
+    stored_source = resolve_under(root, source_path, (Path("source"),))
+    expected_source = (
+        (root / "source" / f"original.{source_format}").resolve()
+        if valid_source_format
+        else None
+    )
+    if stored_source is None or expected_source is None or stored_source != expected_source:
+        expected_source_label = (
+            f"source/original.{source_format}"
+            if valid_source_format
+            else "source/original.pdf or source/original.epub"
+        )
+        errors.append(
+            f"source.path must resolve to the immutable stored source: {expected_source_label}"
+        )
     elif check_files:
         if not stored_source.is_file():
             errors.append(f"source.path is missing: {source_path}")

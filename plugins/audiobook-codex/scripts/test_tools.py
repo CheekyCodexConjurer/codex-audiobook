@@ -79,7 +79,22 @@ def write_pdf_with_image(path: Path, image_path: Path) -> None:
     image.save(path, "PDF", resolution=72.0)
 
 
+def create_junction(link: Path, target: Path) -> None:
+    command = subprocess.list2cmdline(["mklink", "/J", str(link), str(target)])
+    completed = subprocess.run(
+        ["cmd.exe", "/d", "/c", command],
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(
+            f"Could not create test junction {link}: {completed.stderr or completed.stdout}"
+        )
+
+
 def main() -> None:
+    from audio_tools import SAMPLE_RATE, transcode, write_wav
+    from path_safety import resolve_under
     from pypdf import PdfWriter
     from chatterbox_text import DEFAULT_MAX_CHARS, NarratorTextError, prepare_chatterbox_segments
     from render_chatterbox import (
@@ -89,6 +104,7 @@ def main() -> None:
         FEMININA_PROFILE_CALIBRATION,
         selected_profile,
     )
+    from validate_book_map import validate_book_map
 
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
@@ -296,6 +312,56 @@ def main() -> None:
             str(absolute_map_path),
             "--check-files",
         )
+        copied_source = book_root / "metadata" / "borrowed-source.pdf"
+        copied_source.write_bytes((book_root / "source" / "original.pdf").read_bytes())
+        inroot_source_map = json.loads(map_path.read_text(encoding="utf-8"))
+        inroot_source_map["source"]["path"] = "metadata/borrowed-source.pdf"
+        inroot_source_map_path = book_root / "metadata" / "inroot-source-map.json"
+        inroot_source_map_path.write_text(
+            json.dumps(inroot_source_map, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "validate_book_map.py"),
+            "--book-map",
+            str(inroot_source_map_path),
+            "--check-files",
+        )
+        invalid_source_format_map = copy.deepcopy(initial_map)
+        invalid_source_format_map["source"]["format"] = []
+        invalid_source_format_errors = validate_book_map(
+            invalid_source_format_map,
+            book_root,
+            False,
+            True,
+        )
+        assert "source.format must be pdf or epub" in invalid_source_format_errors
+        junction_root = root / "junction-root"
+        junction_target_root = root / "junction-targets"
+        for index, subtree in enumerate(
+            (
+                Path("source"),
+                Path("assets") / "images" / "original",
+                Path("restoration") / "approved",
+                Path("text") / "source" / "pages",
+                Path("text") / "locutor",
+            ),
+            start=1,
+        ):
+            target = junction_target_root / f"target-{index}"
+            target.mkdir(parents=True)
+            (target / "probe.txt").write_text("redirected", encoding="utf-8")
+            link = junction_root / subtree
+            link.parent.mkdir(parents=True, exist_ok=True)
+            create_junction(link, target)
+            assert (
+                resolve_under(
+                    junction_root,
+                    (subtree / "probe.txt").as_posix(),
+                    (subtree,),
+                )
+                is None
+            )
 
         spread_library = root / "spread-library"
         spread_root = spread_library / "spread-book"
@@ -513,6 +579,25 @@ def main() -> None:
         image_asset = image_assets["assets"][0]
         assert image_asset["source"]["format"] == "pdf"
         assert (image_book_root / image_asset["original"]["path"]).is_file()
+        escaped_original_assets = copy.deepcopy(image_assets)
+        escaped_original = escaped_original_assets["assets"][0]["original"]
+        escaped_original["path"] = "assets/images/original/../../../source/original.pdf"
+        escaped_original["sha256"] = sha256_file(image_book_root / "source" / "original.pdf")
+        escaped_original_assets_path = image_book_root / "metadata" / "escaped-original-assets.json"
+        escaped_original_assets_path.write_text(
+            json.dumps(escaped_original_assets, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "validate_assets_manifest.py"),
+            "--assets-manifest",
+            str(escaped_original_assets_path),
+            "--book-root",
+            str(image_book_root),
+            "--book-map",
+            str(image_map_path),
+            "--check-files",
+        )
         image_assets["assets"][0]["classification"]["content"] = "illustration"
         image_assets["assets"][0]["classification"]["text_pixels"] = "none"
         image_assets["assets"][0]["classification"]["restoration_eligibility"] = "review_required"
@@ -630,6 +715,62 @@ def main() -> None:
             str(absolute_ledger_path),
             "--text-root",
             str(text_root),
+        )
+        locutor_page = text_root / "locutor" / "pages" / "page-0001.txt"
+        locutor_page.parent.mkdir(parents=True)
+        locutor_page.write_text("Texto derivado do locutor.", encoding="utf-8")
+        source_from_locutor = copy.deepcopy(ledger)
+        source_from_locutor["pages"][0]["source_file"] = "locutor/pages/page-0001.txt"
+        source_from_locutor["pages"][0]["source_sha256"] = sha256_file(locutor_page)
+        source_from_locutor_path = book_root / "metadata" / "source-from-locutor-ledger.json"
+        source_from_locutor_path.write_text(
+            json.dumps(source_from_locutor, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "verify_text_ledger.py"),
+            "--book-map",
+            str(map_path),
+            "--ledger",
+            str(source_from_locutor_path),
+            "--text-root",
+            str(text_root),
+        )
+        locutor_ledger = copy.deepcopy(ledger)
+        locutor_ledger["pages"][0]["locutor_file"] = "locutor/pages/page-0001.txt"
+        locutor_ledger["pages"][0]["locutor_sha256"] = sha256_file(locutor_page)
+        locutor_ledger_path = book_root / "metadata" / "locutor-ledger.json"
+        locutor_ledger_path.write_text(
+            json.dumps(locutor_ledger, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run(
+            str(ROOT / "verify_text_ledger.py"),
+            "--book-map",
+            str(map_path),
+            "--ledger",
+            str(locutor_ledger_path),
+            "--text-root",
+            str(text_root),
+            "--require-locutor",
+        )
+        locutor_from_source = copy.deepcopy(locutor_ledger)
+        locutor_from_source["pages"][0]["locutor_file"] = "source/pages/page-0001.txt"
+        locutor_from_source["pages"][0]["locutor_sha256"] = sha256_file(source_file)
+        locutor_from_source_path = book_root / "metadata" / "locutor-from-source-ledger.json"
+        locutor_from_source_path.write_text(
+            json.dumps(locutor_from_source, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "verify_text_ledger.py"),
+            "--book-map",
+            str(map_path),
+            "--ledger",
+            str(locutor_from_source_path),
+            "--text-root",
+            str(text_root),
+            "--require-locutor",
         )
 
         export_map = json.loads(image_map_path.read_text(encoding="utf-8"))
@@ -1087,6 +1228,28 @@ def main() -> None:
             str(image_map_path),
             "--check-files",
         )
+        escaped_approved_assets = copy.deepcopy(image_assets)
+        escaped_approved = escaped_approved_assets["assets"][0]["restoration"]["approved"]
+        escaped_approved["path"] = (
+            "restoration/approved/../../assets/images/original/" + original_path.name
+        )
+        escaped_approved["sha256"] = original_asset["original"]["sha256"]
+        escaped_approved["media_type"] = original_asset["original"]["media_type"]
+        escaped_approved_assets_path = image_book_root / "metadata" / "escaped-approved-assets.json"
+        escaped_approved_assets_path.write_text(
+            json.dumps(escaped_approved_assets, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "validate_assets_manifest.py"),
+            "--assets-manifest",
+            str(escaped_approved_assets_path),
+            "--book-root",
+            str(image_book_root),
+            "--book-map",
+            str(image_map_path),
+            "--check-files",
+        )
         run(
             str(ROOT / "build_epub_manifest.py"),
             "--book-map",
@@ -1128,64 +1291,33 @@ def main() -> None:
                 if path.startswith("OEBPS/images/")
             )
 
-        narrator = image_text_root / "locutor" / "book.txt"
-        narrator.parent.mkdir(parents=True, exist_ok=True)
-        narrator.write_text("Texto do locutor para teste.", encoding="utf-8")
         audio_root = image_book_root / "audio"
-        mock_wav_root = audio_root / "mock" / "wav"
-        run(
-            str(ROOT / "render_kokoro.py"),
-            "--input-file",
-            str(narrator),
-            "--output-dir",
-            str(mock_wav_root),
-            "--book-root",
-            str(image_book_root),
-            "--format",
-            "wav",
-            "--mock",
-        )
-        manifest = json.loads(
-            (image_book_root / "metadata" / "audio-manifest.json").read_text(encoding="utf-8")
-        )
-        assert manifest["mock"] is True
-        assert manifest["render_mode"] == "mock"
-        assert manifest["segments"]
-        assert (mock_wav_root / "audiobook.wav").is_file()
+        mock_wav = audio_root / "mock" / "wav" / "audiobook.wav"
+        mock_wav.parent.mkdir(parents=True)
+        write_wav(mock_wav, b"\x00\x00" * SAMPLE_RATE)
+        assert mock_wav.is_file()
         compressed_audio_root = audio_root / "mock" / "m4a"
-        run(
-            str(ROOT / "render_kokoro.py"),
-            "--input-file",
-            str(narrator),
-            "--output-dir",
-            str(compressed_audio_root),
-            "--book-root",
-            str(image_book_root),
-            "--format",
-            "m4a",
-            "--mock",
-            "--overwrite",
-        )
+        compressed_audio_root.mkdir(parents=True)
         compressed_audio = compressed_audio_root / "audiobook.m4a"
+        transcode(mock_wav, compressed_audio, "m4a")
         assert compressed_audio.is_file()
         audio_manifest_path = image_book_root / "metadata" / "audio-manifest.json"
-        audio_manifest = json.loads(audio_manifest_path.read_text(encoding="utf-8"))
+        audio_manifest = {
+            "schema_version": "1.0",
+            "mock": True,
+            "render_mode": "mock",
+            "final_audio": compressed_audio.relative_to(image_book_root).as_posix(),
+            "final_audio_sha256": sha256_file(compressed_audio),
+        }
+        audio_manifest_path.write_text(
+            json.dumps(audio_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         assert audio_manifest["final_audio_sha256"] == sha256_file(compressed_audio)
         mp3_audio_root = audio_root / "mock" / "mp3"
-        run(
-            str(ROOT / "render_kokoro.py"),
-            "--input-file",
-            str(narrator),
-            "--output-dir",
-            str(mp3_audio_root),
-            "--book-root",
-            str(image_book_root),
-            "--format",
-            "mp3",
-            "--mock",
-            "--overwrite",
-        )
+        mp3_audio_root.mkdir(parents=True)
         mp3_audio = mp3_audio_root / "audiobook.mp3"
+        transcode(mock_wav, mp3_audio, "mp3")
         assert mp3_audio.is_file()
         probe = subprocess.run(
             [
@@ -1214,6 +1346,7 @@ def main() -> None:
             str(compressed_audio),
         )
         audio_manifest["mock"] = False
+        audio_manifest["render_mode"] = "real"
         audio_manifest_path.write_text(
             json.dumps(audio_manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -1237,6 +1370,7 @@ def main() -> None:
             "schema_version": "1.0",
             "mock": False,
             "render_mode": "real",
+            "engine": "chatterbox-multilingual-v3-pt-br",
             "final_audio": real_audio.relative_to(image_book_root).as_posix(),
             "final_audio_sha256": sha256_file(real_audio),
         }
@@ -1254,6 +1388,23 @@ def main() -> None:
         )
         real_audio.write_bytes(compressed_audio.read_bytes())
         real_manifest["final_audio_sha256"] = sha256_file(real_audio)
+        audio_manifest_path.write_text(
+            json.dumps(real_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        non_chatterbox_manifest = dict(real_manifest)
+        non_chatterbox_manifest.pop("engine")
+        audio_manifest_path.write_text(
+            json.dumps(non_chatterbox_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "publish_artifacts.py"),
+            "--book-root",
+            str(image_book_root),
+            "--audio",
+            str(real_audio),
+        )
         audio_manifest_path.write_text(
             json.dumps(real_manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -1307,6 +1458,7 @@ def main() -> None:
             "321",
         )
         invalid_chatterbox_text = image_text_root / "locutor" / "invalid-chatterbox.txt"
+        invalid_chatterbox_text.parent.mkdir(parents=True, exist_ok=True)
         invalid_chatterbox_text.write_text("[thoughtful] Texto.", encoding="utf-8")
         invalid_chatterbox_output = audio_root / "chatterbox-invalid-text"
         run_fails(
@@ -1376,22 +1528,6 @@ def main() -> None:
             "--marketplace",
             str(bad_marketplace),
         )
-
-        if os.environ.get("KOKORO_REAL_SMOKE") == "1":
-            kokoro_python = os.environ.get("KOKORO_PYTHON")
-            if not kokoro_python:
-                raise AssertionError("KOKORO_REAL_SMOKE=1 requires KOKORO_PYTHON.")
-            run_with_python(
-                kokoro_python,
-                str(ROOT / "render_kokoro.py"),
-                "--input-file",
-                str(narrator),
-                "--output-dir",
-                str(book_root / "audio-real"),
-                "--standalone",
-                "--format",
-                "m4a",
-            )
 
         if os.environ.get("CHATTERBOX_REAL_SMOKE") == "1":
             chatterbox_python = os.environ.get("CHATTERBOX_PYTHON")

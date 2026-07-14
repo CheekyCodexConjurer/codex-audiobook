@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "example-voice-v1",
+  "purpose": "select one local TTS profile by cross-prompt consistency",
+  "status": "draft",
+  "voice_reference": {
+    "path": null,
+    "sha256": null
+  },
+  "prompts": [
+    {
+      "id": "01-narracao",
+      "text_path": "validation-corpus/01-narracao.txt",
+      "text_sha256": "<sha256>",
+      "target_audio_path": null,
+      "target_audio_sha256": null
+    },
+    {
+      "id": "02-dialogo",
+      "text_path": "validation-corpus/02-dialogo.txt",
+      "text_sha256": "<sha256>",
+      "target_audio_path": null,
+      "target_audio_sha256": null
+    },
+    {
+      "id": "03-semiotica",
+      "text_path": "validation-corpus/03-semiotica.txt",
+      "text_sha256": "<sha256>",
+      "target_audio_path": null,
+      "target_audio_sha256": null
+    }
+  ]
+}

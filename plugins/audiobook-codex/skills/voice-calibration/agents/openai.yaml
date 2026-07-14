@@ -1,0 +1,4 @@
+interface:
+  display_name: "Voice Calibration"
+  short_description: "Calibrate local audiobook voice profiles"
+  default_prompt: "Use $voice-calibration to prepare and validate a local TTS voice profile from a three-prompt corpus."

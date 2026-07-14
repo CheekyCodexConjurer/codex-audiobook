@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "profile_name": "example-voice-v1",
+  "status": "approved",
+  "engine": "local-tts-engine",
+  "voice_reference": {
+    "path": "<workspace-relative-path>",
+    "sha256": "<sha256>"
+  },
+  "corpus": {
+    "path": "validation-corpus/corpus.json",
+    "sha256": "<sha256>"
+  },
+  "selection": {
+    "path": "selection/selection.json",
+    "sha256": "<sha256>",
+    "winner_id": "<candidate-id>",
+    "robust_score": 0.0,
+    "mean_composite_score": 0.0,
+    "minimum_composite_score": 0.0
+  },
+  "parameters": {},
+  "runtime_fingerprint": {},
+  "listening_review": {
+    "status": "approved",
+    "reviewed_by": "<reviewer>",
+    "notes": ""
+  },
+  "dsp": {
+    "status": "raw-wav-retained",
+    "notes": ""
+  },
+  "production_smoke": {
+    "input_sha256": "<sha256>",
+    "output_sha256": "<sha256>"
+  }
+}
