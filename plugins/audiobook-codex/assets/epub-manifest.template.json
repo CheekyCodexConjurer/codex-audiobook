@@ -1,8 +1,14 @@
 {
   "schema_version": "1.0",
+  "text_edition": "original",
   "book_map_sha256": "",
   "text_ledger_sha256": "",
   "assets_manifest_sha256": "",
+  "layout": {
+    "mode": "semantic",
+    "path": "metadata/epub-layout.json",
+    "sha256": ""
+  },
   "language": "pt-BR",
   "visual_profile": {
     "name": "antique-paper",

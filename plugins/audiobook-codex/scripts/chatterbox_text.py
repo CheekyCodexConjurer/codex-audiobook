@@ -26,6 +26,10 @@ _COMMON_ABBREVIATION = re.compile(
     r"profa|prof|sra|sr|tel|vol|pp|p)\.",
     re.IGNORECASE,
 )
+_ISOLATED_ROMAN_NUMERAL = re.compile(r"^[MDCLXVI]+\.?$")
+_LABELLED_ROMAN_NUMERAL = re.compile(
+    r"\b(?i:cap[ií]tulo|parte|livro|volume|tomo|se[cç][aã]o|nota)\s+[MDCLXVI]+\b",
+)
 _UPPERCASE_TOKEN = re.compile(r"\b[A-ZÀ-ÖØ-Þ]{2,}\b")
 
 
@@ -38,6 +42,12 @@ class NarratorSegment:
     line_number: int
     text: str
     warnings: tuple[str, ...]
+    semantic_id: str | None = None
+    chapter_id: str | None = None
+    role: str = "prose"
+    logical_pages: tuple[int, ...] = ()
+    pause_after_seconds: float | None = None
+    pause_after_kind: str = "uniform"
 
 
 def _error(line_number: int, message: str) -> NarratorTextError:
@@ -85,6 +95,16 @@ def prepare_chatterbox_segments(text: str, max_chars: int) -> list[NarratorSegme
             raise _error(line_number, "contains a URL or email; use an approved spoken form.")
         if _COMMON_ABBREVIATION.search(segment):
             raise _error(line_number, "contains an abbreviation; expand it into PT-BR speech.")
+        if _ISOLATED_ROMAN_NUMERAL.fullmatch(segment):
+            raise _error(
+                line_number,
+                "contains an isolated Roman numeral; use its approved spoken PT-BR form.",
+            )
+        if _LABELLED_ROMAN_NUMERAL.search(segment):
+            raise _error(
+                line_number,
+                "contains a labelled Roman numeral; use its approved spoken PT-BR form.",
+            )
         segments.append(
             NarratorSegment(
                 line_number=line_number,

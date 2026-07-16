@@ -146,13 +146,24 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "validate_book_map.py",
         "validate_assets_manifest.py",
         "verify_text_ledger.py",
+        "verify_translation_ledger.py",
+        "verify_revision_ledger.py",
+        "validate_narrator_lineage.py",
+        "narrator_quality.py",
+        "validate_narrator_quality.py",
+        "narration_plan.py",
+        "validate_narration_plan.py",
         "build_epub_manifest.py",
+        "epub_layout.py",
+        "validate_epub_layout.py",
         "epub_presentation.py",
         "export_epub.py",
         "validate_epub_export.py",
         "validate_feminina_profile.py",
         "path_safety.py",
         "audio_tools.py",
+        "chapter_audio.py",
+        "validate_chapter_audio.py",
         "render_chatterbox.py",
         "chatterbox_text.py",
         "publish_artifacts.py",
@@ -164,11 +175,96 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "book-map.template.json",
         "assets-manifest.template.json",
         "text-ledger.template.json",
+        "translation-ledger.template.json",
+        "revision-ledger.template.json",
         "epub-manifest.template.json",
+        "epub-layout.template.json",
         "narrator-changes.template.json",
+        "narrator-review.template.json",
     ):
         if not (plugin_root / "assets" / filename).is_file():
             errors.append(f"plugin is missing assets/{filename}")
+    template_contracts = {
+        "book-map.template.json": ("1.0", ("source", "analysis", "pages")),
+        "assets-manifest.template.json": ("1.0", ("source_sha256", "assets")),
+        "text-ledger.template.json": ("1.0", ("book_map_sha256", "pages")),
+        "translation-ledger.template.json": (
+            "1.0",
+            (
+                "book_map_sha256",
+                "text_ledger_sha256",
+                "source_language",
+                "target_language",
+                "translation_decision",
+                "edition",
+                "pages",
+                "chapter_outputs",
+            ),
+        ),
+        "revision-ledger.template.json": (
+            "1.0",
+            (
+                "book_map_sha256",
+                "text_ledger_sha256",
+                "language",
+                "status",
+                "reviewed_by",
+                "changes",
+                "chapter_outputs",
+            ),
+        ),
+        "epub-manifest.template.json": (
+            "1.0",
+            ("book_map_sha256", "text_ledger_sha256", "assets_manifest_sha256", "documents"),
+        ),
+        "epub-layout.template.json": (
+            "1.0",
+            ("text_edition", "book_map_sha256", "text_ledger_sha256", "documents"),
+        ),
+        "narrator-changes.template.json": (
+            "2.0",
+            (
+                "source_book_sha256",
+                "book_map_sha256",
+                "base_edition",
+                "base_ledger_sha256",
+                "mode",
+                "outputs",
+                "changes",
+            ),
+        ),
+        "narrator-review.template.json": (
+            "1.0",
+            (
+                "profile",
+                "status",
+                "reviewed_by",
+                "output_file",
+                "output_sha256",
+                "narrator_changes_sha256",
+                "review_scope",
+                "findings",
+                "pronunciation_review",
+            ),
+        ),
+    }
+    for filename, (schema_version, keys) in template_contracts.items():
+        path = plugin_root / "assets" / filename
+        if not path.is_file():
+            continue
+        try:
+            template = load_json(path)
+        except RuntimeError as error:
+            errors.append(str(error))
+            continue
+        if not isinstance(template, dict):
+            errors.append(f"template {filename} must be a JSON object")
+            continue
+        if schema_version is not None and template.get("schema_version") != schema_version:
+            errors.append(f"template {filename} schema_version must be {schema_version}")
+        for key in keys:
+            if key not in template:
+                errors.append(f"template {filename} is missing {key}")
     for filename in (
         "fonts/im-fell-english/IMFeENrm28P.ttf",
         "fonts/im-fell-english/IMFeENit28P.ttf",

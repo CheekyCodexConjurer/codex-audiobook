@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "profile": "faithful-natural-v1",
+  "status": "approved",
+  "reviewed_by": "codex",
+  "output_file": "locutor/book.txt",
+  "output_sha256": "",
+  "narrator_changes_sha256": "",
+  "review_scope": {
+    "categories": [
+      "heading",
+      "prose",
+      "dialogue",
+      "quotation",
+      "verse",
+      "note",
+      "list"
+    ],
+    "logical_pages": [1]
+  },
+  "findings": [],
+  "pronunciation_review": {
+    "status": "approved",
+    "reviewed_by": "codex",
+    "entries": []
+  }
+}

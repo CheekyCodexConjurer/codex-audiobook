@@ -56,7 +56,7 @@ $bindings = @(
     'Numpad0 & Numpad3::PastePrompt("$codex-workflows mode=RESEARCH.DEEP scope{web|github|repo?} no-edits fanout=adaptive evidence{primary|official|repo} synthesize{solution|roadmap} topic: ")',
     'Numpad0 & Numpad7::PastePrompt("$audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\Pessoal\e-books} output{book-map.json|assets-manifest.json} visual-fallback{pdf|computer} swarm{bounded}")',
     'Numpad0 & Numpad8::PastePrompt("$audiobook-codex stage=TRANSCRIBE native-only input{book-map.json|assets-manifest.json} output{text/source|epub-manifest.json} fidelity=strict ledger=required epub-profile{antique-paper}")',
-    'Numpad0 & Numpad9::PastePrompt("$audiobook-codex stage=RENDER native-only input{text/source|epub-manifest.json} output{text/locutor|audio|epub|publish-root} tts{chatterbox-pt-br} voice-profile{feminina-v1} locutor{line-delimited-v1|max=320} language=pt-BR epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required")'
+    'Numpad0 & Numpad9::PastePrompt("$audiobook-codex stage=RENDER native-only input{text/source|text/translation/pt-BR?|epub-manifest*.json} output{text/locutor|audio|epub|publish-root} narrator{faithful|archaic-modernized|translated-pt-br} tts{chatterbox-pt-br} voice-profile{feminina-v1} locutor{faithful-natural-v1|line-delimited-v1|max=320|quality-review=required|narration-plan=paragraph-pauses-v1} language=pt-BR text-edition{original|translated-pt-br} epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required")'
 )
 $mapPrompt = '$audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\Pessoal\e-books} output{book-map.json|assets-manifest.json} visual-fallback{pdf|computer} swarm{bounded}'
 
@@ -99,6 +99,18 @@ if ($LASTEXITCODE -ne 0) {
 & $runtimePython (Join-Path $plugin 'scripts\test_tools.py')
 if ($LASTEXITCODE -ne 0) {
     throw 'Audiobook plugin script validation failed.'
+}
+
+$focusedScriptTests = @(
+    'test_narration_plan.py',
+    'test_narrator_quality.py',
+    'test_epub_notes.py'
+)
+foreach ($testScript in $focusedScriptTests) {
+    & $runtimePython (Join-Path $plugin "scripts\$testScript")
+    if ($LASTEXITCODE -ne 0) {
+        throw "Audiobook focused script validation failed: $testScript"
+    }
 }
 
 & $runtimePython -B (Join-Path $voiceCalibrationSkill 'scripts\test_voice_calibration.py')

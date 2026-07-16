@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0",
+  "book_map_sha256": "",
+  "text_ledger_sha256": "",
+  "source_language": "",
+  "target_language": "pt-BR",
+  "translation_decision": {
+    "scope": "whole-book",
+    "reason": "",
+    "reviewed_by": "codex",
+    "evidence": [
+      {
+        "logical_page": 1,
+        "source_sha256": "",
+        "source_span": "",
+        "reason": ""
+      }
+    ]
+  },
+  "edition": {
+    "book": {
+      "title": "",
+      "subtitle": ""
+    },
+    "document_titles": [
+      {
+        "id": "chapter-01",
+        "title": ""
+      }
+    ]
+  },
+  "pages": [
+    {
+      "logical_page": 1,
+      "status": "verified",
+      "source_file": "source/pages/page-0001.txt",
+      "source_sha256": "",
+      "translation_file": "translation/pt-BR/pages/page-0001.txt",
+      "translation_sha256": "",
+      "translated_by": "codex",
+      "reviewed_by": "codex",
+      "notes": ""
+    }
+  ],
+  "chapter_outputs": [
+    {
+      "id": "chapter-01",
+      "source_file": "source/chapters/chapter-01-title.txt",
+      "source_sha256": "",
+      "translation_file": "translation/pt-BR/chapters/chapter-01-title.txt",
+      "translation_sha256": "",
+      "source_pages": [
+        {
+          "logical_page": 1,
+          "source_sha256": ""
+        }
+      ],
+      "translated_by": "codex",
+      "reviewed_by": "codex"
+    }
+  ]
+}

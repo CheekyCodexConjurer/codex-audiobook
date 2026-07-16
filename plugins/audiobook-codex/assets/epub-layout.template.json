@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "text_edition": "original",
+  "book_map_sha256": "",
+  "text_ledger_sha256": "",
+  "documents": [
+    {
+      "id": "chapter-01",
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 1,
+          "spans": [
+            {
+              "source_file": "text/source/pages/page-0001.txt",
+              "source_sha256": "",
+              "start_line": 1,
+              "end_line": 2
+            }
+          ]
+        },
+        {
+          "kind": "paragraph",
+          "spans": [
+            {
+              "source_file": "text/source/pages/page-0001.txt",
+              "source_sha256": "",
+              "start_line": 4,
+              "end_line": 8
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

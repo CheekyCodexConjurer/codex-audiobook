@@ -35,11 +35,18 @@ E:\Pessoal\e-books\<book>\
 |  |- book-map.json
 |  |- assets-manifest.json
 |  |- text-ledger.json
+|  |- epub-layout.json
+|  |- translation-ledger.json
 |  |- epub-manifest.json
+|  |- epub-manifest.pt-br.json
+|  |- audio-chapters-manifest.json
 |  |- audio-manifest.json
 |  `- publication-manifest.json
 |- pages\
 |- text\
+|  |- source\
+|  |- translation\pt-BR\
+|  `- locutor\
 |- audio\
 |- restoration\
 |- exports\epub\
@@ -56,18 +63,44 @@ NUM0+2 $codex-workflows mode=IMPL.PHASE approved-roadmap goal-managed phased par
 NUM0+3 $codex-workflows mode=RESEARCH.DEEP scope{web|github|repo?} no-edits fanout=adaptive evidence{primary|official|repo} synthesize{solution|roadmap} topic:
 NUM0+7 $audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\Pessoal\e-books} output{book-map.json|assets-manifest.json} visual-fallback{pdf|computer} swarm{bounded}
 NUM0+8 $audiobook-codex stage=TRANSCRIBE native-only input{book-map.json|assets-manifest.json} output{text/source|epub-manifest.json} fidelity=strict ledger=required epub-profile{antique-paper}
-NUM0+9 $audiobook-codex stage=RENDER native-only input{text/source|epub-manifest.json} output{text/locutor|audio|epub|publish-root} tts{chatterbox-pt-br} voice-profile{feminina-v1} locutor{line-delimited-v1|max=320} language=pt-BR epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required
+NUM0+9 $audiobook-codex stage=RENDER native-only input{text/source|text/translation/pt-BR?|epub-manifest*.json} output{text/locutor|audio|epub|publish-root} narrator{faithful|archaic-modernized|translated-pt-br} tts{chatterbox-pt-br} voice-profile{feminina-v1} locutor{faithful-natural-v1|line-delimited-v1|max=320|quality-review=required|narration-plan=paragraph-pauses-v1} language=pt-BR text-edition{original|translated-pt-br} epub-profile{antique-paper} epub-images{original|approved-restored} restoration=review-required
 ```
 
-`NUM0+9` produces the canonical EPUB from verified `text/source` and original assets.
+Use direct invocation, not a shortcut, for a whole-book translation:
+
+```text
+$audiobook-codex stage=TRANSLATE native-only input{text/source|text-ledger.json|epub-manifest.json} output{text/translation/pt-BR|translation-ledger.json|translated-epub} scope{whole-foreign-language-book-only} language=pt-BR epub-images{original|approved-restored}
+```
+
+`NUM0+8` remains source-faithful: it never corrects, modernizes, translates, or normalizes
+the source. It records EPUB presentation separately in `metadata/epub-layout.json`, using
+verified page-line spans for paragraphs, dialogues, verses, and headings. `NUM0+9` remains the render route; choose a source-faithful mode from
+verified `text/source`, or a translated PT-BR mode only after `stage=TRANSLATE` has
+produced a separate ledger and edition. The final render prompt may name the selected
+edition, but it must not make translation implicit.
+
+`NUM0+9` defaults to the canonical EPUB from verified `text/source` and original
+assets. A translated PT-BR EPUB is an explicit separate text edition and never replaces
+the canonical one.
+
+Every new `NUM0+9` render applies `faithful-natural-v1`: the locutor text is reviewed
+for natural PT-BR speech, semantic line boundaries, headings, dialogue, quotations,
+verse, punctuation, numeric forms, and pronunciation-sensitive terms. It records the
+result in `metadata/narrator-review.json` and renders with `--require-quality`.
 After the final audio and EPUB pass validation, run `publish_artifacts.py` to copy only
 the unified audiobook and selected EPUB into the root of that book's library folder.
 The provenance copies remain in `audio/` and `exports/epub/`.
 
 New exports use the `antique-paper` profile: IM FELL English, the bundled OFL license,
-the warm paper palette, and a locally generated editorial cover. The original source
+a white reading surface with black text, and a locally generated editorial cover. The original source
 cover remains in the reading order. A restored EPUB is separate and requires a recorded
 visual approval for every generated derivative.
+
+`text/translation/pt-BR` is optional and exists only when the whole source book is in
+another language. A Portuguese book with intentional isolated English or other foreign
+words remains a Portuguese source and is not translated. A translated EPUB is a separate
+semantic PT-BR edition with PT-BR text and metadata; it keeps source image pixels
+unchanged unless an already approved restored edition is explicitly selected.
 
 ## Validate
 
@@ -107,11 +140,19 @@ It uses the locally downloaded `ResembleAI/Chatterbox-Multilingual-pt-br` V3 mod
 and the bundled reference voice
 `plugins\audiobook-codex\assets\voices\Feminina.mp3`. Render it through that virtual
 environment, then publish the final artifacts. The default `feminina-v1` profile fixes
-the calibrated seed, sampling parameters, `min_p=0.114`, and a 0.22-second inter-line
-silence. It is selected against the three-prompt calibration corpus and verifies the
+the calibrated seed, sampling parameters, and `min_p=0.114`. It is selected against the
+three-prompt calibration corpus and verifies the
 bundled voice hash before naming a render `feminina-v1`. Its narrator input is one
 complete spoken locution per non-empty line, with a 320-character maximum; the renderer
 rejects digits, common abbreviations, URLs, email addresses, and bracketed audio markup.
+Book renders additionally require `metadata/narration-plan.json`: it preserves semantic
+paragraphs where they fit, records provenance, and applies 60 ms continuation, 170 ms
+sentence, 420 ms paragraph, and 1 s heading pauses during assembly.
+Completed units are assembled under `audio\chatterbox-pt-br\chapters\`: immutable
+matrices in `original\`, final-speed WAV/MP3 files in `final\`, and listening variants
+in `temp\`.
+After reviewing a chapter, render just it with `--chapters chapter-01`; the complete
+audiobook remains a separate artifact until it is remounted from valid segments.
 The Chatterbox process forces Hugging Face and Transformers offline so missing local
 assets fail instead of being fetched.
 
@@ -123,7 +164,9 @@ $python = 'E:\Pessoal\tts\chatterbox-multilingual-v3\venv\Scripts\python.exe'
   --book-root $book `
   --input-file "$book\text\locutor\book.txt" `
   --output-dir "$book\audio\chatterbox-pt-br" `
-  --format mp3
+  --format mp3 `
+  --require-lineage `
+  --require-quality
 
 python .\plugins\audiobook-codex\scripts\publish_artifacts.py `
   --book-root $book `

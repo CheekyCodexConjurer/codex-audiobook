@@ -7,12 +7,23 @@ from pathlib import Path
 import re
 import sys
 
+from epub_layout import layout_descriptor
+from epub_layout import load_json as load_layout_json
+from epub_layout import validate_layout
 from epub_presentation import default_visual_profile
 from validate_assets_manifest import load_json as load_assets_json
 from validate_assets_manifest import validate_assets_manifest
 from validate_book_map import load_json as load_book_map_json
 from validate_book_map import validate_book_map
+from verify_text_ledger import chapter_output_records
 from verify_text_ledger import verify as verify_text_ledger
+from verify_translation_ledger import TARGET_LANGUAGE
+from verify_translation_ledger import translated_document_titles
+from verify_translation_ledger import translation_chapter_output_records
+from verify_translation_ledger import verify as verify_translation_ledger
+from verify_revision_ledger import TARGET_LANGUAGE as REVISION_LANGUAGE
+from verify_revision_ledger import revision_chapter_output_records
+from verify_revision_ledger import verify as verify_revision_ledger
 
 
 FIGURE_ROLES = {"illustration", "facsimile"}
@@ -139,13 +150,14 @@ def asset_document_assignments(assets_manifest: dict, documents: list[dict]) -> 
     return assignments
 
 
-def build_manifest(
+def build_source_manifest(
     book_root: Path,
     book_map: dict,
     ledger: dict,
     assets_manifest: dict,
     text_root: Path,
     visual_profile: str,
+    layout_path: Path | None,
 ) -> dict:
     chapters_root = text_root / "source" / "chapters"
     if not chapters_root.is_dir():
@@ -230,6 +242,7 @@ def build_manifest(
     book = book_map.get("book") if isinstance(book_map.get("book"), dict) else {}
     manifest = {
         "schema_version": "1.0",
+        "text_edition": "original",
         "book_map_sha256": sha256_file(book_root / "metadata" / "book-map.json"),
         "text_ledger_sha256": sha256_file(book_root / "metadata" / "text-ledger.json"),
         "assets_manifest_sha256": sha256_file(book_root / "metadata" / "assets-manifest.json"),
@@ -245,6 +258,201 @@ def build_manifest(
     }
     if visual_profile == "antique-paper":
         manifest["visual_profile"] = default_visual_profile()
+    if layout_path is not None:
+        layout = load_layout_json(layout_path)
+        errors = validate_layout(
+            layout,
+            book_root,
+            sha256_file(book_root / "metadata" / "book-map.json"),
+            sha256_file(book_root / "metadata" / "text-ledger.json"),
+            ledger,
+            [document["id"] for document in documents if document.get("kind") != "source_cover"],
+        )
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        manifest["layout"] = layout_descriptor(book_root, layout_path)
+    return manifest
+
+
+def build_translated_manifest(
+    book_root: Path,
+    book_map: dict,
+    ledger: dict,
+    translation_ledger: dict,
+    assets_manifest: dict,
+    text_root: Path,
+    visual_profile: str,
+) -> dict:
+    source_outputs = chapter_output_records(ledger)
+    translated_outputs = translation_chapter_output_records(translation_ledger)
+    translated_titles = translated_document_titles(translation_ledger)
+    source_chapters_root = text_root / "source" / "chapters"
+    documents: list[dict] = []
+
+    for front_file in sorted(source_chapters_root.glob("front-*.txt")):
+        prefix = front_file.stem.split("-", 2)
+        number = prefix[1] if len(prefix) > 1 else f"{len(documents) + 1:02d}"
+        document_id = f"front-{number}"
+        source_output = source_outputs.get(document_id)
+        translated_output = translated_outputs.get(document_id)
+        if not isinstance(source_output, dict) or not isinstance(translated_output, dict):
+            raise RuntimeError(f"Missing validated translated output for {document_id}")
+        documents.append(
+            {
+                "id": document_id,
+                "kind": document_kind_for_front(front_file),
+                "title": translated_titles[document_id],
+                "source_file": f"text/{source_output['source_file']}",
+                "source_sha256": source_output["source_sha256"],
+                "translation_file": f"text/{translated_output['translation_file']}",
+                "translation_sha256": translated_output["translation_sha256"],
+                "asset_ids": [],
+            }
+        )
+
+    for chapter in sorted(book_map.get("chapters", []), key=lambda entry: entry.get("number", 0)):
+        if not isinstance(chapter, dict):
+            continue
+        chapter_id = chapter.get("id")
+        if not isinstance(chapter_id, str):
+            continue
+        source_output = source_outputs.get(chapter_id)
+        translated_output = translated_outputs.get(chapter_id)
+        if not isinstance(source_output, dict) or not isinstance(translated_output, dict):
+            raise RuntimeError(f"Missing validated translated output for {chapter_id}")
+        documents.append(
+            {
+                "id": chapter_id,
+                "kind": "chapter",
+                "title": translated_titles[chapter_id],
+                "chapter_id": chapter_id,
+                "roman_number": chapter.get("roman_number"),
+                "source_file": f"text/{source_output['source_file']}",
+                "source_sha256": source_output["source_sha256"],
+                "translation_file": f"text/{translated_output['translation_file']}",
+                "translation_sha256": translated_output["translation_sha256"],
+                "asset_ids": [],
+            }
+        )
+
+    if not documents:
+        source_output = source_outputs.get("book")
+        translated_output = translated_outputs.get("book")
+        if not isinstance(source_output, dict) or not isinstance(translated_output, dict):
+            raise RuntimeError("Missing validated translated book output")
+        documents.append(
+            {
+                "id": "book",
+                "kind": "book",
+                "title": translated_titles["book"],
+                "source_file": f"text/{source_output['source_file']}",
+                "source_sha256": source_output["source_sha256"],
+                "translation_file": f"text/{translated_output['translation_file']}",
+                "translation_sha256": translated_output["translation_sha256"],
+                "asset_ids": [],
+            }
+        )
+
+    has_source_cover = any(document.get("kind") in {"cover", "source_cover"} for document in documents)
+    declared_cover_assets = [
+        asset
+        for asset in assets_manifest.get("assets", [])
+        if isinstance(asset, dict) and is_declared_source_cover(asset)
+    ]
+    if declared_cover_assets and not has_source_cover:
+        documents.insert(
+            0,
+            {
+                "id": "source-cover",
+                "kind": "source_cover",
+                "title": "Capa da fonte",
+                "source_file": None,
+                "source_sha256": None,
+                "asset_ids": [],
+            },
+        )
+
+    assignments = asset_document_assignments(assets_manifest, documents)
+    for document in documents:
+        document["asset_ids"] = assignments[document["id"]]
+
+    source_book = book_map.get("book") if isinstance(book_map.get("book"), dict) else {}
+    edition = translation_ledger.get("edition") if isinstance(translation_ledger.get("edition"), dict) else {}
+    translated_book = edition.get("book") if isinstance(edition.get("book"), dict) else {}
+    manifest = {
+        "schema_version": "1.0",
+        "text_edition": "translated-pt-br",
+        "book_map_sha256": sha256_file(book_root / "metadata" / "book-map.json"),
+        "text_ledger_sha256": sha256_file(book_root / "metadata" / "text-ledger.json"),
+        "translation_ledger_sha256": sha256_file(book_root / "metadata" / "translation-ledger.json"),
+        "assets_manifest_sha256": sha256_file(book_root / "metadata" / "assets-manifest.json"),
+        "source_language": translation_ledger["source_language"],
+        "language": TARGET_LANGUAGE,
+        "book": {
+            "title": str(translated_book["title"]),
+            "subtitle": str(translated_book.get("subtitle") or ""),
+            "author": str(source_book.get("author") or ""),
+            "publication_year": source_book.get("original_publication_year"),
+            "publication_place": str(source_book.get("original_publication_place") or ""),
+        },
+        "documents": documents,
+    }
+    if visual_profile == "antique-paper":
+        manifest["visual_profile"] = default_visual_profile()
+    return manifest
+
+
+def build_revised_manifest(
+    book_root: Path,
+    book_map: dict,
+    ledger: dict,
+    revision_ledger: dict,
+    assets_manifest: dict,
+    text_root: Path,
+    visual_profile: str,
+    layout_path: Path | None,
+) -> dict:
+    manifest = build_source_manifest(
+        book_root,
+        book_map,
+        ledger,
+        assets_manifest,
+        text_root,
+        visual_profile,
+        layout_path,
+    )
+    revised_outputs = revision_chapter_output_records(revision_ledger)
+    edition = revision_ledger.get("edition")
+    document_titles = edition.get("document_titles") if isinstance(edition, dict) else []
+    titles = {
+        entry["id"]: entry["title"]
+        for entry in document_titles
+        if isinstance(entry, dict)
+        and isinstance(entry.get("id"), str)
+        and isinstance(entry.get("title"), str)
+        and entry["title"].strip()
+    } if isinstance(document_titles, list) else {}
+    for document in manifest["documents"]:
+        if document.get("kind") == "source_cover":
+            continue
+        output = revised_outputs.get(document["id"])
+        if not isinstance(output, dict):
+            raise RuntimeError(f"Missing validated revised output for {document['id']!r}")
+        document["revised_file"] = f"text/{output['revised_file']}"
+        document["revised_sha256"] = output["revised_sha256"]
+        if document["id"] in titles:
+            document["title"] = titles[document["id"]]
+    revised_book = edition.get("book") if isinstance(edition, dict) else None
+    if isinstance(revised_book, dict):
+        for field in ("title", "subtitle"):
+            value = revised_book.get(field)
+            if isinstance(value, str) and value.strip():
+                manifest["book"][field] = value
+    manifest["text_edition"] = "revised-pt-br"
+    manifest["revision_ledger_sha256"] = sha256_file(
+        book_root / "metadata" / "revision-ledger.json"
+    )
+    manifest["language"] = REVISION_LANGUAGE
     return manifest
 
 
@@ -255,6 +463,15 @@ def main() -> None:
     parser.add_argument("--assets-manifest", required=True, type=Path)
     parser.add_argument("--text-root", required=True, type=Path)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--translation-ledger", type=Path)
+    parser.add_argument("--revision-ledger", type=Path)
+    parser.add_argument(
+        "--text-edition",
+        choices=("original", "revised-pt-br", "translated-pt-br"),
+        default="original",
+    )
+    parser.add_argument("--layout", choices=("semantic", "legacy"))
+    parser.add_argument("--epub-layout", type=Path)
     parser.add_argument("--visual-profile", choices=("antique-paper", "none"), default="antique-paper")
     args = parser.parse_args()
 
@@ -270,6 +487,49 @@ def main() -> None:
             "assets manifest": (assets_path, book_root / "metadata" / "assets-manifest.json"),
             "text root": (text_root, book_root / "text"),
         }
+        if args.text_edition == "translated-pt-br":
+            translation_path = (
+                args.translation_ledger.expanduser().resolve()
+                if args.translation_ledger
+                else book_root / "metadata" / "translation-ledger.json"
+            )
+            canonical_paths["translation ledger"] = (
+                translation_path,
+                book_root / "metadata" / "translation-ledger.json",
+            )
+        else:
+            translation_path = None
+        if args.text_edition == "revised-pt-br":
+            revision_path = (
+                args.revision_ledger.expanduser().resolve()
+                if args.revision_ledger
+                else book_root / "metadata" / "revision-ledger.json"
+            )
+            canonical_paths["revision ledger"] = (
+                revision_path,
+                book_root / "metadata" / "revision-ledger.json",
+            )
+        else:
+            revision_path = None
+        layout_mode = args.layout or ("legacy" if args.text_edition == "translated-pt-br" else "semantic")
+        if args.text_edition == "translated-pt-br":
+            if args.epub_layout is not None:
+                raise RuntimeError("translated-pt-br EPUB manifests do not support an original semantic EPUB layout")
+            layout_path = None
+        elif layout_mode == "semantic":
+            layout_path = (
+                args.epub_layout.expanduser().resolve()
+                if args.epub_layout
+                else book_root / "metadata" / "epub-layout.json"
+            )
+            canonical_paths["EPUB layout"] = (
+                layout_path,
+                book_root / "metadata" / "epub-layout.json",
+            )
+        else:
+            if args.epub_layout is not None:
+                raise RuntimeError("--epub-layout requires --layout semantic")
+            layout_path = None
         for label, (actual, expected) in canonical_paths.items():
             if actual != expected:
                 raise RuntimeError(f"{label} must use the canonical path: {expected}")
@@ -280,19 +540,85 @@ def main() -> None:
             raise RuntimeError("Book map, ledger, and assets manifest must be JSON objects.")
         errors = validate_book_map(book_map, book_root, True, True)
         errors += verify_text_ledger(book_map, sha256_file(map_path), ledger, text_root, False, True)
+        translation_ledger = None
+        revision_ledger = None
+        if translation_path is not None:
+            translation_ledger = load_assets_json(translation_path)
+            if not isinstance(translation_ledger, dict):
+                raise RuntimeError("Translation ledger must be a JSON object.")
+            errors += verify_translation_ledger(
+                book_map,
+                sha256_file(map_path),
+                ledger,
+                sha256_file(ledger_path),
+                translation_ledger,
+                text_root,
+            )
+        if revision_path is not None:
+            revision_ledger = load_assets_json(revision_path)
+            if not isinstance(revision_ledger, dict):
+                raise RuntimeError("Revision ledger must be a JSON object.")
+            errors += verify_revision_ledger(
+                book_map,
+                sha256_file(map_path),
+                ledger,
+                sha256_file(ledger_path),
+                revision_ledger,
+                text_root,
+            )
         errors += validate_assets_manifest(assets_manifest, book_root, book_map, True)
         if errors:
             raise RuntimeError("; ".join(errors))
-        output = args.output.expanduser().resolve() if args.output else book_root / "metadata" / "epub-manifest.json"
+        output = (
+            args.output.expanduser().resolve()
+            if args.output
+            else book_root
+            / "metadata"
+            / (
+                "epub-manifest.pt-br.json"
+                if args.text_edition == "translated-pt-br"
+                else (
+                    "epub-manifest.revised.json"
+                    if args.text_edition == "revised-pt-br"
+                    else "epub-manifest.json"
+                )
+            )
+        )
         write_json(
             output,
-            build_manifest(
-                book_root,
-                book_map,
-                ledger,
-                assets_manifest,
-                text_root,
-                args.visual_profile,
+            (
+                build_translated_manifest(
+                    book_root,
+                    book_map,
+                    ledger,
+                    translation_ledger,
+                    assets_manifest,
+                    text_root,
+                    args.visual_profile,
+                )
+                if translation_ledger is not None
+                else (
+                    build_revised_manifest(
+                        book_root,
+                        book_map,
+                        ledger,
+                        revision_ledger,
+                        assets_manifest,
+                        text_root,
+                        args.visual_profile,
+                        layout_path,
+                    )
+                    if revision_ledger is not None
+                    else build_source_manifest(
+                        book_root,
+                        book_map,
+                        ledger,
+                        assets_manifest,
+                        text_root,
+                        args.visual_profile,
+                        layout_path,
+                    )
+                )
             ),
         )
     except RuntimeError as error:

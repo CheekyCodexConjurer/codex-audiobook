@@ -1,7 +1,7 @@
 {
   "name": "audiobook-codex",
-  "version": "0.4.0+codex.20260714172005",
-  "description": "Native-only Codex workflow for mapping books, preserving visual assets, producing faithful text, exporting EPUB editions, and rendering local Chatterbox PT-BR audiobooks.",
+  "version": "0.6.0+codex.20260714200000",
+  "description": "Native-only Codex workflow for mapping books, preserving source text, reviewing natural PT-BR narrator text, optionally translating whole foreign-language books to PT-BR, exporting EPUB editions, and rendering local Chatterbox PT-BR audiobooks.",
   "author": {
     "name": "Matheus"
   },

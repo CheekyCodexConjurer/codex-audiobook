@@ -9,12 +9,16 @@ import re
 
 PROFILE_NAME = "antique-paper"
 FONT_FAMILY = "IM FELL English"
-PAGE_BACKGROUND = "#F3E7C9"
-TEXT_PRIMARY = "#3B2A1F"
-TEXT_SECONDARY = "#6B5140"
-HEADING_COLOR = "#4A2F22"
-BORDER_COLOR = "#B89B72"
-ACCENT_COLOR = "#8C5A2B"
+PAGE_BACKGROUND = "#FFFFFF"
+TEXT_PRIMARY = "#000000"
+TEXT_SECONDARY = "#000000"
+HEADING_COLOR = "#000000"
+COVER_BACKGROUND = "#FFFFFF"
+COVER_TEXT_PRIMARY = "#3B2A1F"
+COVER_TEXT_SECONDARY = "#6B5140"
+COVER_HEADING_COLOR = "#4A2F22"
+COVER_BORDER_COLOR = "#B89B72"
+COVER_ACCENT_COLOR = "#8C5A2B"
 
 ASSETS_ROOT = Path(__file__).resolve().parent.parent / "assets"
 FONT_ROOT = ASSETS_ROOT / "fonts" / "im-fell-english"
@@ -97,14 +101,19 @@ def profile_stylesheet(profile: dict | None) -> str:
     if profile is None:
         return "\n".join(
             [
-                "html { color: #1a1715; background: #fffdf8; }",
-                "body { margin: 0; padding: 0 1.25rem 2rem; font-family: Georgia, 'Times New Roman', serif; line-height: 1.58; }",
+                "html { color: #000000; background: #ffffff; }",
+                "body { margin: 0; padding: 0 1.25rem 2rem; background: #ffffff; color: #000000; font-family: Georgia, 'Times New Roman', serif; line-height: 1.58; }",
                 "section { max-width: 42rem; margin: 0 auto; }",
+                "h1, h2, h3 { color: #000000; }",
                 "h1 { margin: 2rem 0 1.5rem; font-size: 1.55rem; text-align: center; font-weight: 700; }",
                 "p { margin: 0 0 1rem; text-align: justify; text-indent: 1.4rem; }",
-                "p:first-of-type { text-indent: 0; }",
-                ".illustration { margin: 1.5rem auto; text-align: center; }",
-                ".illustration img { max-width: 100%; height: auto; }",
+                ".legacy-layout p:first-of-type { text-indent: 0; }",
+                ".source-heading { margin: 2rem 0 1.35rem; text-align: center; font-weight: 700; }",
+                ".heading-line, .verse-line { display: block; }",
+                ".dialogue { margin-left: 1.4rem; text-align: left; text-indent: -1.4rem; }",
+                ".verse { display: table; margin: 1.35rem auto; max-width: 100%; text-align: left; }",
+                ".illustration { margin: 1.5rem auto; max-width: 32rem; text-align: center; }",
+                ".illustration img { display: block; width: auto; max-width: 100%; height: auto; margin: 0 auto; }",
             ]
         )
     return "\n".join(
@@ -126,8 +135,6 @@ def profile_stylesheet(profile: dict | None) -> str:
             f"  --text-primary: {TEXT_PRIMARY};",
             f"  --text-secondary: {TEXT_SECONDARY};",
             f"  --heading-color: {HEADING_COLOR};",
-            f"  --border-color: {BORDER_COLOR};",
-            f"  --accent-color: {ACCENT_COLOR};",
             "}",
             "html { background-color: var(--page-background); color: var(--text-primary); }",
             f'body {{ margin: 0; padding: 0 1.5rem 2.5rem; background-color: var(--page-background); color: var(--text-primary); font-family: "{FONT_FAMILY}", Georgia, "Times New Roman", serif; line-height: 1.64; }}',
@@ -135,10 +142,16 @@ def profile_stylesheet(profile: dict | None) -> str:
             "h1 { margin: 2.4rem 0 1.7rem; color: var(--heading-color); font-size: 1.7rem; font-weight: 400; text-align: center; }",
             "h2, h3 { color: var(--heading-color); font-weight: 400; }",
             "p { margin: 0 0 1.05rem; text-align: justify; text-indent: 1.5rem; }",
-            "p:first-of-type { text-indent: 0; }",
-            "em, i { color: var(--text-secondary); }",
-            ".illustration { margin: 1.75rem auto; text-align: center; }",
-            ".illustration img { max-width: 100%; height: auto; }",
+            ".legacy-layout p:first-of-type { text-indent: 0; }",
+            "em, i { color: inherit; }",
+            ".source-heading { margin: 2.4rem 0 1.55rem; color: var(--heading-color); text-align: center; font-weight: 400; }",
+            ".source-heading .heading-line, .verse-line { display: block; }",
+                ".semantic-layout .dialogue { margin-left: 1.5rem; text-align: left; text-indent: -1.5rem; }",
+                ".verse { display: table; margin: 1.55rem auto; max-width: 100%; text-align: left; }",
+                ".footnote { margin: 1.35rem 0; padding-top: 0.75rem; border-top: 1px solid #000000; }",
+                ".footnote p { font-size: 0.9em; text-align: left; text-indent: 0; }",
+                ".illustration { margin: 1.75rem auto; max-width: 32rem; text-align: center; }",
+            ".illustration img { display: block; width: auto; max-width: 100%; height: auto; margin: 0 auto; }",
             "body.cover-page { margin: 0; padding: 0; }",
             ".editorial-cover { margin: 0; max-width: none; padding: 0; text-align: center; }",
             ".editorial-cover img { display: block; height: auto; margin: 0 auto; max-width: 100%; width: 100%; }",
@@ -243,10 +256,10 @@ def cover_image(book: dict) -> bytes:
 
     image_module, image_draw, image_font = _require_pillow()
     width, height = 1200, 1800
-    image = image_module.new("RGB", (width, height), PAGE_BACKGROUND)
+    image = image_module.new("RGB", (width, height), COVER_BACKGROUND)
     draw = image_draw.Draw(image)
-    draw.rectangle((54, 54, width - 54, height - 54), outline=BORDER_COLOR, width=5)
-    draw.rectangle((78, 78, width - 78, height - 78), outline=ACCENT_COLOR, width=2)
+    draw.rectangle((54, 54, width - 54, height - 54), outline=COVER_BORDER_COLOR, width=5)
+    draw.rectangle((78, 78, width - 78, height - 78), outline=COVER_ACCENT_COLOR, width=2)
 
     regular_path = FONT_ROOT / "IMFeENrm28P.ttf"
     italic_path = FONT_ROOT / "IMFeENit28P.ttf"
@@ -258,10 +271,10 @@ def cover_image(book: dict) -> bytes:
     draw.text(
         ((width - (label_bounds[2] - label_bounds[0])) / 2, top),
         label,
-        fill=ACCENT_COLOR,
+        fill=COVER_ACCENT_COLOR,
         font=label_font,
     )
-    draw.line((width * 0.28, top + 70, width * 0.72, top + 70), fill=BORDER_COLOR, width=3)
+    draw.line((width * 0.28, top + 70, width * 0.72, top + 70), fill=COVER_BORDER_COLOR, width=3)
 
     title_font, title_lines = _fitted_lines(
         draw,
@@ -279,7 +292,7 @@ def cover_image(book: dict) -> bytes:
         draw,
         title_lines,
         title_font,
-        HEADING_COLOR,
+        COVER_HEADING_COLOR,
         width,
         430,
         spacing=20,
@@ -303,7 +316,7 @@ def cover_image(book: dict) -> bytes:
             draw,
             subtitle_lines,
             subtitle_font,
-            TEXT_SECONDARY,
+            COVER_TEXT_SECONDARY,
             width,
             1000,
             spacing=14,
@@ -327,7 +340,7 @@ def cover_image(book: dict) -> bytes:
             draw,
             author_lines,
             fitted_author_font,
-            TEXT_PRIMARY,
+            COVER_TEXT_PRIMARY,
             canvas_width=width,
             top=1240,
             spacing=12,
@@ -355,13 +368,13 @@ def cover_image(book: dict) -> bytes:
             draw,
             publication_lines,
             fitted_publication_font,
-            TEXT_SECONDARY,
+            COVER_TEXT_SECONDARY,
             canvas_width=width,
             top=1530,
             spacing=10,
         )
 
-    draw.line((width * 0.28, height - 170, width * 0.72, height - 170), fill=BORDER_COLOR, width=3)
+    draw.line((width * 0.28, height - 170, width * 0.72, height - 170), fill=COVER_BORDER_COLOR, width=3)
     output = BytesIO()
     image.save(output, format="JPEG", quality=92, optimize=True)
     return output.getvalue()

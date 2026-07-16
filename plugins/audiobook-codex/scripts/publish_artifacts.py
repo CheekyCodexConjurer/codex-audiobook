@@ -12,8 +12,13 @@ import shutil
 import sys
 import unicodedata
 
+from path_safety import resolve_under
+from validate_narrator_lineage import validate_lineage
+
 
 CHATTERBOX_ENGINE = "chatterbox-multilingual-v3-pt-br"
+EPUB_TEXT_EDITIONS = {"original", "revised-pt-br", "translated-pt-br"}
+EPUB_IMAGE_EDITIONS = {"original", "approved-restored"}
 
 
 @dataclass(frozen=True)
@@ -22,6 +27,7 @@ class Publication:
     source: Path
     destination: Path
     record: dict
+    edition_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +120,29 @@ def require_real_audio_manifest(book_root: Path, source: Path) -> tuple[Path, di
         raise RuntimeError("Audio source does not match metadata/audio-manifest.json final_audio")
     if manifest.get("final_audio_sha256") != sha256_file(source):
         raise RuntimeError("Audio source SHA-256 does not match metadata/audio-manifest.json")
+    lineage = manifest.get("narrator_lineage")
+    if not isinstance(lineage, dict) or lineage.get("status") in {"legacy-untracked", "standalone"}:
+        raise RuntimeError("Refusing audio without validated narrator lineage")
+    lineage_path = resolve_under(book_root, lineage.get("path"), (Path("metadata"),))
+    input_file = resolve_under(book_root, manifest.get("input_file"), (Path("text") / "locutor",))
+    if lineage_path is None or not lineage_path.is_file():
+        raise RuntimeError("Audio narrator lineage file is missing or invalid")
+    if input_file is None or not input_file.is_file():
+        raise RuntimeError("Audio narrator input is missing or invalid")
+    if manifest.get("input_sha256") != sha256_file(input_file):
+        raise RuntimeError("Audio narrator input SHA-256 does not match metadata/audio-manifest.json")
+    lineage_errors, provenance = validate_lineage(book_root, lineage_path, input_file)
+    if lineage_errors:
+        raise RuntimeError("Audio narrator lineage is invalid: " + "; ".join(lineage_errors))
+    for key in (
+        "narrator_changes_sha256",
+        "mode",
+        "base_edition",
+        "base_ledger_sha256",
+        "output_id",
+    ):
+        if lineage.get(key) != (provenance or {}).get(key):
+            raise RuntimeError(f"Audio narrator lineage {key} does not match current provenance")
     return manifest_path, manifest
 
 
@@ -144,12 +173,22 @@ def prepare_epub_publication(book_root: Path, source: Path) -> tuple[Publication
         raise RuntimeError("EPUB sidecar path does not match the source EPUB")
     if sidecar.get("epub_sha256") != sha256_file(source):
         raise RuntimeError("EPUB sidecar SHA-256 does not match the source EPUB")
+    text_edition = sidecar.get("text_edition", "original")
+    image_edition = sidecar.get("image_edition", "original")
+    if text_edition not in EPUB_TEXT_EDITIONS:
+        raise RuntimeError("EPUB sidecar text edition is invalid")
+    if image_edition not in EPUB_IMAGE_EDITIONS:
+        raise RuntimeError("EPUB sidecar image edition is invalid")
     destination = book_root / source.name
+    record = publication_record(book_root, source, destination)
+    record["text_edition"] = text_edition
+    record["image_edition"] = image_edition
     publication = Publication(
         "epub",
         source,
         destination,
-        publication_record(book_root, source, destination),
+        record,
+        f"{text_edition}:{image_edition}",
     )
     sidecar["publication"] = publication.record
     return publication, sidecar_path, sidecar
@@ -272,7 +311,23 @@ def main() -> None:
         artifacts = existing.get("artifacts")
         if not isinstance(artifacts, dict):
             artifacts = {}
-        artifacts.update({publication.kind: publication.record for publication in publications})
+        artifacts.update(
+            {
+                publication.kind: publication.record
+                for publication in publications
+                if publication.kind != "epub"
+            }
+        )
+        epub_publications = [publication for publication in publications if publication.kind == "epub"]
+        if epub_publications:
+            editions = artifacts.get("epub_editions")
+            if not isinstance(editions, dict):
+                editions = {}
+            for publication in epub_publications:
+                artifacts["epub"] = publication.record
+                if publication.edition_key is not None:
+                    editions[publication.edition_key] = publication.record
+            artifacts["epub_editions"] = editions
         metadata_updates.append(
             (
                 publication_manifest_path,

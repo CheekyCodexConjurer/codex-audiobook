@@ -13,8 +13,14 @@ book/
 |  |- book-map.json
 |  |- assets-manifest.json
 |  |- text-ledger.json
+|  |- epub-layout.json
+|  |- translation-ledger.json (optional)
 |  |- epub-manifest.json
+|  |- epub-manifest.pt-br.json (optional)
 |  |- narrator-changes.json
+|  |- narrator-review.json
+|  |- audio-render-journal.json
+|  |- audio-chapters-manifest.json
 |  |- audio-manifest.json
 |  `- publication-manifest.json
 |- pages/
@@ -26,15 +32,21 @@ book/
 |- text/
 |  |- source/pages/
 |  |- source/chapters/
+|  |- translation/pt-BR/pages/
+|  |- translation/pt-BR/chapters/
 |  |- locutor/pages/
 |  `- locutor/chapters/
 |- audio/
 |  |- segments/
 |  `- chapters/
+|     |- original/
+|     |- final/
+|     `- temp/
 |- exports/
 |  `- epub/
 |- <book>-audiobook.mp3
-`- <book>-fiel-classico.epub
+|- <book>-fiel-classico.epub
+`- <book>-pt-br-classico.epub (optional)
 ```
 
 ## `book-map.json`
@@ -184,34 +196,256 @@ Chapter records cover exactly their mapped verified pages. Front-matter records 
 exactly the remaining verified pages, and a fallback `book` output covers all verified
 pages.
 
+## `epub-layout.json`
+
+The original-text EPUB layout is a presentation map, never a replacement for
+`text/source`. It contains ordered `paragraph`, `dialogue`, `verse`, `heading`, and `note`
+blocks. Each block references inclusive line ranges from verified source-page files.
+Every non-empty verified page line must appear exactly once across the layout, in source
+order. This allows chapter transitions inside a printed page without editing source text.
+
+```json
+{
+  "schema_version": "1.0",
+  "text_edition": "original",
+  "book_map_sha256": "",
+  "text_ledger_sha256": "",
+  "documents": [
+    {
+      "id": "chapter-01",
+      "blocks": [
+        {
+          "kind": "heading",
+          "level": 1,
+          "spans": [
+            {
+              "source_file": "text/source/pages/page-0001.txt",
+              "source_sha256": "",
+              "start_line": 1,
+              "end_line": 2
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+`heading` requires a level from 1 to 6. A `note` has a book-unique safe `id` and
+book-unique source marker such as `2`, `*`, `†`, or `‡`; the exporter emits a semantic EPUB footnote
+and links an attached body marker when one exists. All other block kinds omit `level`. A semantic
+original EPUB manifest records this layout as `{mode, path, sha256}`. Legacy original
+manifests may omit it and use the legacy renderer explicitly. Translated PT-BR EPUBs do
+not reuse the original line map.
+
 ## `narrator-changes.json`
 
 Keep narrator changes traceable:
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "source_book_sha256": "",
+  "book_map_sha256": "",
+  "base_edition": "source",
+  "base_ledger_sha256": "",
+  "mode": "faithful",
+  "archaic_assessment": {
+    "status": "not_applicable",
+    "reviewed_by": "",
+    "evidence": [
+      {
+        "logical_page": 1,
+        "source_sha256": "",
+        "source_span": "",
+        "reason": ""
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "id": "book",
+      "kind": "full-book",
+      "locutor_file": "locutor/book.txt",
+      "locutor_sha256": "",
+      "base_outputs": [
+        {
+          "id": "chapter-01",
+          "base_file": "source/chapters/chapter-01-title.txt",
+          "base_sha256": ""
+        }
+      ],
+      "reviewed_by": "codex"
+    }
+  ],
   "changes": [
     {
-      "logical_pages": [1],
-      "source_sha256": "",
-      "locutor_sha256": "",
+      "output_id": "book",
       "kind": "punctuation",
-      "reason": "Clarified an unambiguous spoken pause."
+      "logical_pages": [1],
+      "base_output_id": "chapter-01",
+      "base_span": "",
+      "locutor_span": "",
+      "reason": "Clarified an unambiguous spoken pause.",
+      "reviewed_by": "codex"
     }
   ]
 }
 ```
 
-The narrator file is derived output. It must never overwrite or replace the source file.
+The narrator file is derived output. It must never overwrite or replace the source
+file. `base_edition` is `source` unless the optional translation stage produced a
+complete approved PT-BR ledger, in which case it is `translated-pt-br`. Every
+`base_output` pins the exact source or translated chapter hash used by a locutor file.
+
+Allowed modes are `faithful`, `archaic-modernized`, and `translated-pt-br`. A
+`faithful` or `archaic-modernized` locutor derives from source. The latter requires
+`archaic_assessment.status: "confirmed"` plus page-level source spans, reasons, and
+review. Each evidence record binds one verified source page by SHA-256 and must quote a
+span from that page. Each archaic change carries that page hash and must match one
+assessment record by normalized base span, its single logical page, and SHA-256. It must
+not be selected merely because a book is old. A non-Portuguese source
+must use the translated mode after the translation ledger passes.
+
+Each change is granular: record the exact base and locutor snippets, output and base
+IDs, pages, reason, and reviewer. Number expansion, punctuation for speech,
+page-furniture removal, approved figure descriptions, reviewed archaic modernization,
+an approved `editorial_correction`, and `note_relocation` all require records.
+
+## `narrator-review.json`
+
+Every new narrator render uses `faithful-natural-v1`. The review is a separate
+quality gate: it binds the selected locutor output and its current
+`narrator-changes.json`, records the result of the semantic speech review, and prevents
+unresolved quality findings from reaching a `--require-quality` render.
+
+```json
+{
+  "schema_version": "1.0",
+  "profile": "faithful-natural-v1",
+  "status": "approved",
+  "reviewed_by": "codex",
+  "output_file": "locutor/book.txt",
+  "output_sha256": "",
+  "narrator_changes_sha256": "",
+  "review_scope": {
+    "categories": ["heading", "prose", "dialogue", "quotation", "verse", "note", "list"],
+    "logical_pages": [1]
+  },
+  "findings": [],
+  "pronunciation_review": {
+    "status": "approved",
+    "reviewed_by": "codex",
+    "entries": []
+  }
+}
+```
+
+Each finding records its deterministic ID, kind, severity, locutor span, line and
+column, reviewed locution category, logical pages, decision, reason, and reviewer.
+`suggested_category`, when present in a draft, is non-authoritative and must not replace
+the reviewer-selected `category`.
+Remaining review-level findings may be preserved only with an explicit rationale. Roman
+headings and labelled Roman numerals are blocking findings and must be converted to an
+approved spoken form.
+Pronunciation entries record the term class, selected spoken form or preservation, cited
+pages, rationale, and reviewer. The review never substitutes for
+`narrator-changes.json`: every actual text transformation remains a granular narrator
+change.
+
+## `translation-ledger.json`
+
+Translation is optional and only for a whole source book written in another language.
+A Portuguese book with intentional isolated English or other foreign words remains a
+source-faithful Portuguese book and does not create this ledger.
+
+`translation_decision.evidence` covers every verified source page with a page hash and
+quoted source span. This is a reviewed whole-work language decision, not automatic
+translation triggered by isolated foreign words.
+
+```json
+{
+  "schema_version": "1.0",
+  "book_map_sha256": "",
+  "text_ledger_sha256": "",
+  "source_language": "",
+  "target_language": "pt-BR",
+  "translation_decision": {
+    "scope": "whole-book",
+    "reason": "The complete source work is in English.",
+    "reviewed_by": "codex",
+    "evidence": [
+      {
+        "logical_page": 1,
+        "source_sha256": "",
+        "source_span": "",
+        "reason": "Verified as part of the whole-work language decision."
+      }
+    ]
+  },
+  "edition": {
+    "book": {
+      "title": "Titulo em PT-BR",
+      "subtitle": ""
+    },
+    "document_titles": [
+      {
+        "id": "chapter-01",
+        "title": "Capitulo Um"
+      }
+    ]
+  },
+  "pages": [
+    {
+      "logical_page": 1,
+      "status": "verified",
+      "source_file": "source/pages/page-0001.txt",
+      "source_sha256": "",
+      "translation_file": "translation/pt-BR/pages/page-0001.txt",
+      "translation_sha256": "",
+      "translated_by": "codex",
+      "reviewed_by": "codex",
+      "notes": ""
+    }
+  ],
+  "chapter_outputs": [
+    {
+      "id": "chapter-01",
+      "source_file": "source/chapters/chapter-01-title.txt",
+      "source_sha256": "",
+      "translation_file": "translation/pt-BR/chapters/chapter-01-title.txt",
+      "translation_sha256": "",
+      "source_pages": [
+        {
+          "logical_page": 1,
+          "source_sha256": ""
+        }
+      ],
+      "translated_by": "codex",
+      "reviewed_by": "codex"
+    }
+  ]
+}
+```
+
+The translated EPUB is a separate semantic PT-BR edition. Its text and metadata may
+be PT-BR, but source image pixels remain unchanged. Approved restored images are still
+derivatives selected by export mode; they never become translation evidence.
 
 ## `epub-manifest.json`
 
 The EPUB manifest is created only after `text-ledger.json` passes. It defines semantic
 reading order and binds a chapter or front-matter document to verified source text.
+Its non-cover documents must preserve the canonical front-matter and chapter order
+derived from the validated source tree and `book-map.json`; the manifest cannot reorder
+them.
 The canonical EPUB always uses `text/source`; `text/locutor` is never an implicit EPUB
-input.
+input. A translated EPUB uses `text/translation/pt-BR` only when
+`metadata/translation-ledger.json` is complete and approved. Its manifest is
+`metadata/epub-manifest.pt-br.json`, with `text_edition: "translated-pt-br"`,
+translation hashes, PT-BR document titles, and each document's original
+`source_file` plus its selected `translation_file`.
 
 ```json
 {
@@ -219,6 +453,11 @@ input.
   "book_map_sha256": "",
   "text_ledger_sha256": "",
   "assets_manifest_sha256": "",
+  "layout": {
+    "mode": "semantic",
+    "path": "metadata/epub-layout.json",
+    "sha256": ""
+  },
   "language": "pt-BR",
   "visual_profile": {
     "name": "antique-paper",
@@ -246,29 +485,60 @@ invent a visual placement or caption merely to fill the EPUB.
 An EPUB-origin image explicitly declared as its source cover may create a
 `source_cover` document when the source spine has no corresponding title-page XHTML.
 That document has `source_file` and `source_sha256` set to `null`, references at least
-one original cover asset, and is placed immediately after the generated editorial cover.
+one original cover asset, appears at most once, and is the first manifest document
+(immediately after the generated editorial cover in the EPUB spine).
 
 `visual_profile` is optional for legacy manifests. New manifests use `antique-paper`,
 which packages the plugin-bundled IM FELL English Regular and Italic together with its
-OFL license, applies the fixed paper palette, and generates a deterministic editorial
-cover from verified book metadata. It does not replace the original cover/title-page
-asset, which remains in the source reading order.
+OFL license, applies black text on white reading pages and a white editorial cover, and
+generates that cover deterministically from verified book metadata. It does not replace the original
+cover/title-page asset, which remains in the source reading order.
 
-The export writes `exports/epub/<book>-fiel-classico.epub` for original images and may
-write `exports/epub/<book>-restaurada-classico.epub` only when every selected derivative
-is approved. Legacy manifests without `visual_profile` retain the earlier filenames.
+The original-text export writes `exports/epub/<book>-fiel-classico.epub` for original
+images and may write `exports/epub/<book>-restaurada-classico.epub` only when every
+selected derivative is approved. The translated-text export writes
+`exports/epub/<book>-pt-br-classico.epub`, or
+`exports/epub/<book>-pt-br-restaurada-classico.epub` with approved restored images.
+Legacy manifests without `visual_profile` retain the earlier filenames.
 
 ## Audio Manifest
 
-For each segment, record source and narrator hashes, voice, speed, output path, duration, sample rate, and generation time. A later render may reuse only a segment with the same narrator hash and audio settings.
+For each segment, record source and narrator hashes, voice, output path, duration, sample rate, and generation time. A later render may reuse only a segment with the same narrator hash and synthesis settings. Publication cadence is a delivery transformation, not a TTS setting, so it must not invalidate verified segment reuse.
+
+`audio-render-journal.json` is an atomic, incomplete-or-complete companion record used
+while a Chatterbox render is in progress. It records each finished WAV with its narrator
+hash, WAV hash, duration, seed, and render identity. A resumed render reuses only records
+whose text, model, renderer, voice, generation settings, and WAV checksum still match.
+Untracked WAVs are never adopted automatically.
 
 `metadata/audio-manifest.json` is canonical even though the wave segments and final
-audio stay under `audio/`. A Chatterbox PT-BR render additionally records model hashes,
-CUDA/CPU device, reference-voice SHA-256, the resolved profile, renderer hash, installed
-Chatterbox package version, line-delimited narrator policy, and inter-segment silence.
+audio stay under `audio/`. A book render additionally binds
+`metadata/narration-plan.json`: its ordered segment IDs/text hashes and per-boundary
+pause durations are the assembly identity. A Chatterbox PT-BR render additionally records
+model hashes, CUDA/CPU device, reference-voice SHA-256, the resolved profile, renderer
+hash, installed Chatterbox package version, line-delimited narrator policy, and the
+resolved variable boundary pauses.
+`metadata/audio-chapters-manifest.json` is the review-oriented companion artifact. It
+records each contiguous narration-plan chapter, its verified segment identities, the
+immutable 1.0x master under
+`audio/<profile>/chapters/original/<chapter-id>.wav`, and the direct canonical delivery
+outputs under `audio/<profile>/chapters/final/<chapter-id>.wav` and `.mp3`.
+Temporary listening variants belong under `audio/<profile>/chapters/temp/`. Its
+`publication` record names the pitch-preserving processor and selected tempo. Chapter
+outputs omit the final inter-chapter pause; the full-book mount applies that pause when
+joining chapter boundaries.
+`metadata/audio-manifest.json` stores the immutable 1.0x master as
+`raw/audiobook.master.wav` and retains `raw/audiobook.wav` as the canonical delivery
+WAV for compatibility with existing consumers. It records both hashes, the selected
+tempo, and final publishable audio. A new render uses the default `1.20x` tempo unless
+`--publication-tempo` overrides it. `--remount` rebuilds delivery artifacts from a
+complete verified journal without TTS synthesis.
 An official profile additionally records the hash-pinned calibration selection that chose
 it. Each Chatterbox segment records its locutor line, character count, and any punctuation
 or acronym review warnings produced by that policy.
+Every book-root render records `narrator_lineage`: the narrator-change schema and hash,
+mode, selected output ID, base edition, and base-ledger hash. Standalone renders are
+not publishable book artifacts because `publish_artifacts.py` requires this lineage.
 
 ## Publication Manifest
 

@@ -1,5 +1,37 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "2.0",
   "source_book_sha256": "",
+  "book_map_sha256": "",
+  "base_edition": "source",
+  "base_ledger_sha256": "",
+  "mode": "faithful",
+  "archaic_assessment": {
+    "status": "not_applicable",
+    "reviewed_by": "",
+    "evidence": [
+      {
+        "logical_page": 1,
+        "source_sha256": "",
+        "source_span": "",
+        "reason": ""
+      }
+    ]
+  },
+  "outputs": [
+    {
+      "id": "book",
+      "kind": "full-book",
+      "locutor_file": "locutor/book.txt",
+      "locutor_sha256": "",
+      "base_outputs": [
+        {
+          "id": "chapter-01",
+          "base_file": "source/chapters/chapter-01-title.txt",
+          "base_sha256": ""
+        }
+      ],
+      "reviewed_by": "codex"
+    }
+  ],
   "changes": []
 }

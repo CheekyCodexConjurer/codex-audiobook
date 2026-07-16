@@ -5,11 +5,15 @@ from datetime import datetime, timezone
 import hashlib
 import html
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import sys
 import zipfile
 
+from epub_layout import layout_document_index
+from epub_layout import lines_for_block
+from epub_layout import load_json as load_layout_json
+from epub_layout import validate_layout
 from epub_presentation import (
     COVER_DOCUMENT_PATH,
     COVER_IMAGE_PATH,
@@ -25,10 +29,19 @@ from validate_assets_manifest import resolve_under, validate_assets_manifest
 from validate_book_map import load_json as load_book_map_json
 from validate_book_map import validate_book_map
 from verify_text_ledger import chapter_output_records
+from verify_text_ledger import expected_chapter_outputs
 from verify_text_ledger import verify as verify_text_ledger
+from verify_translation_ledger import TARGET_LANGUAGE
+from verify_translation_ledger import translation_chapter_output_records
+from verify_translation_ledger import verify as verify_translation_ledger
+from verify_revision_ledger import TARGET_LANGUAGE as REVISION_LANGUAGE
+from verify_revision_ledger import revision_changes_by_output
+from verify_revision_ledger import revision_chapter_output_records
+from verify_revision_ledger import verify as verify_revision_ledger
 
 
 IMAGE_EDITIONS = {"original", "approved-restored"}
+TEXT_EDITIONS = {"original", "revised-pt-br", "translated-pt-br"}
 
 
 def sha256_file(path: Path) -> str:
@@ -86,7 +99,8 @@ def load_export_context(
     book_root: Path,
     epub_manifest_path: Path,
     assets_manifest_path: Path,
-) -> tuple[dict, dict, dict, dict, Path, Path]:
+    text_edition: str,
+) -> tuple[dict, dict, dict, dict, Path, Path, dict | None, dict | None, dict | None]:
     map_path = book_root / "metadata" / "book-map.json"
     ledger_path = book_root / "metadata" / "text-ledger.json"
     text_root = book_root / "text"
@@ -98,6 +112,9 @@ def load_export_context(
         raise RuntimeError("Book map, ledger, assets manifest, and EPUB manifest must be JSON objects.")
     errors = validate_book_map(book_map, book_root, True, True)
     errors += verify_text_ledger(book_map, sha256_file(map_path), ledger, text_root, False, True)
+    expected_outputs, expected_output_errors = expected_chapter_outputs(book_map, text_root)
+    errors += expected_output_errors
+    expected_document_ids = list(expected_outputs)
     errors += validate_assets_manifest(assets_manifest, book_root, book_map, True)
     if epub_manifest.get("schema_version") != "1.0":
         errors.append("epub manifest schema_version must be '1.0'")
@@ -111,13 +128,122 @@ def load_export_context(
             errors.append(f"epub manifest {key} does not match current input")
     if not require_text(epub_manifest.get("language")):
         errors.append("epub manifest language must be non-empty")
+    manifest_documents = epub_manifest.get("documents")
+    if isinstance(manifest_documents, list):
+        source_cover_indexes = [
+            index
+            for index, document in enumerate(manifest_documents)
+            if isinstance(document, dict) and document.get("kind") == "source_cover"
+        ]
+        if len(source_cover_indexes) > 1:
+            errors.append("epub manifest may declare at most one source_cover document")
+        elif source_cover_indexes and source_cover_indexes[0] != 0:
+            errors.append("epub manifest source_cover document must be first")
+        manifest_document_ids = [
+            document["id"]
+            for document in manifest_documents
+            if isinstance(document, dict)
+            and isinstance(document.get("id"), str)
+            and document.get("kind") != "source_cover"
+        ]
+        if manifest_document_ids != expected_document_ids:
+            errors.append(
+                "epub manifest documents must preserve the validated source document order"
+            )
+    manifest_text_edition = epub_manifest.get("text_edition", "original")
+    if manifest_text_edition not in TEXT_EDITIONS:
+        errors.append("epub manifest text_edition is invalid")
+    elif manifest_text_edition != text_edition:
+        errors.append("epub manifest text_edition does not match requested text edition")
+    translation_ledger = None
+    revision_ledger = None
+    if text_edition == "translated-pt-br":
+        translation_path = book_root / "metadata" / "translation-ledger.json"
+        translation_ledger = load_assets_json(translation_path)
+        if not isinstance(translation_ledger, dict):
+            errors.append("translation ledger must be a JSON object")
+        else:
+            errors += verify_translation_ledger(
+                book_map,
+                sha256_file(map_path),
+                ledger,
+                sha256_file(ledger_path),
+                translation_ledger,
+                text_root,
+            )
+            if epub_manifest.get("translation_ledger_sha256") != sha256_file(translation_path):
+                errors.append("epub manifest translation_ledger_sha256 does not match current input")
+            if epub_manifest.get("source_language") != translation_ledger.get("source_language"):
+                errors.append("epub manifest source_language does not match translation ledger")
+        if epub_manifest.get("language") != TARGET_LANGUAGE:
+            errors.append(f"translated EPUB manifest language must be {TARGET_LANGUAGE}")
+    elif text_edition == "revised-pt-br":
+        revision_path = book_root / "metadata" / "revision-ledger.json"
+        revision_ledger = load_assets_json(revision_path)
+        if not isinstance(revision_ledger, dict):
+            errors.append("revision ledger must be a JSON object")
+        else:
+            errors += verify_revision_ledger(
+                book_map,
+                sha256_file(map_path),
+                ledger,
+                sha256_file(ledger_path),
+                revision_ledger,
+                text_root,
+            )
+            if epub_manifest.get("revision_ledger_sha256") != sha256_file(revision_path):
+                errors.append("epub manifest revision_ledger_sha256 does not match current input")
+        if epub_manifest.get("language") != REVISION_LANGUAGE:
+            errors.append(f"revised EPUB manifest language must be {REVISION_LANGUAGE}")
+    layout = None
+    layout_descriptor = epub_manifest.get("layout")
+    if text_edition == "translated-pt-br":
+        if layout_descriptor is not None:
+            errors.append("translated EPUB manifests cannot use an original semantic EPUB layout")
+    elif layout_descriptor is not None:
+        if not isinstance(layout_descriptor, dict):
+            errors.append("epub manifest layout must be an object")
+        elif layout_descriptor.get("mode") != "semantic":
+            errors.append("epub manifest layout mode must be semantic")
+        elif layout_descriptor.get("path") != "metadata/epub-layout.json":
+            errors.append("epub manifest layout path must be metadata/epub-layout.json")
+        else:
+            layout_path = book_root / "metadata" / "epub-layout.json"
+            if not layout_path.is_file():
+                errors.append(f"epub layout is missing: {layout_path}")
+            elif layout_descriptor.get("sha256") != sha256_file(layout_path):
+                errors.append("epub manifest layout SHA-256 does not match current EPUB layout")
+            else:
+                try:
+                    layout = load_layout_json(layout_path)
+                except RuntimeError as error:
+                    errors.append(str(error))
+                else:
+                    errors += validate_layout(
+                        layout,
+                        book_root,
+                        sha256_file(map_path),
+                        sha256_file(ledger_path),
+                        ledger,
+                        expected_document_ids,
+                    )
     try:
         normalize_visual_profile(epub_manifest.get("visual_profile"))
     except RuntimeError as error:
         errors.append(str(error))
     if errors:
         raise RuntimeError("; ".join(errors))
-    return book_map, ledger, assets_manifest, epub_manifest, map_path, ledger_path
+    return (
+        book_map,
+        ledger,
+        assets_manifest,
+        epub_manifest,
+        map_path,
+        ledger_path,
+        translation_ledger,
+        revision_ledger,
+        layout,
+    )
 
 
 def validate_documents(
@@ -125,6 +251,10 @@ def validate_documents(
     epub_manifest: dict,
     assets_manifest: dict,
     ledger: dict,
+    text_edition: str,
+    translation_ledger: dict | None,
+    revision_ledger: dict | None,
+    layout: dict | None,
 ) -> tuple[list[dict], dict[str, dict]]:
     documents = epub_manifest.get("documents")
     if not isinstance(documents, list) or not documents:
@@ -136,7 +266,23 @@ def validate_documents(
         if isinstance(asset, dict) and isinstance(asset.get("id"), str)
     } if isinstance(assets, list) else {}
     ledger_outputs = chapter_output_records(ledger)
+    translation_outputs = (
+        translation_chapter_output_records(translation_ledger)
+        if isinstance(translation_ledger, dict)
+        else {}
+    )
+    revision_outputs = (
+        revision_chapter_output_records(revision_ledger)
+        if isinstance(revision_ledger, dict)
+        else {}
+    )
+    revision_changes = (
+        revision_changes_by_output(revision_ledger)
+        if isinstance(revision_ledger, dict)
+        else {}
+    )
     text_root = book_root / "text"
+    layout_by_document = layout_document_index(layout) if isinstance(layout, dict) else {}
     ids: set[str] = set()
     validated: list[dict] = []
     for index, document in enumerate(documents):
@@ -151,6 +297,7 @@ def validate_documents(
             raise RuntimeError(f"{label}.title must be non-empty")
         source_file = document.get("source_file")
         source_path = None
+        text_path = None
         is_source_cover = document.get("kind") == "source_cover"
         if is_source_cover:
             if source_file is not None or document.get("source_sha256") is not None:
@@ -172,6 +319,71 @@ def validate_documents(
                 raise RuntimeError(f"{label}.source_file does not match its verified chapter output")
             if document.get("source_sha256") != ledger_output.get("source_sha256"):
                 raise RuntimeError(f"{label}.source_sha256 does not match its verified chapter output")
+            text_path = source_path
+            if text_edition == "translated-pt-br":
+                translation_output = translation_outputs.get(document_id)
+                if not isinstance(translation_output, dict):
+                    raise RuntimeError(f"{label} has no verified PT-BR translation output")
+                translation_file = document.get("translation_file")
+                translation_path = resolve_under(book_root, translation_file)
+                if (
+                    translation_path is None
+                    or not str(translation_file).replace("\\", "/").startswith("text/translation/pt-BR/")
+                ):
+                    raise RuntimeError(f"{label}.translation_file must resolve under text/translation/pt-BR/")
+                if not translation_path.is_file():
+                    raise RuntimeError(f"{label}.translation_file is missing: {translation_file}")
+                if document.get("translation_sha256") != sha256_file(translation_path):
+                    raise RuntimeError(f"{label}.translation_sha256 does not match translation_file")
+                expected_translation_path = resolve_under(
+                    text_root,
+                    translation_output.get("translation_file"),
+                )
+                if expected_translation_path is None or translation_path != expected_translation_path:
+                    raise RuntimeError(
+                        f"{label}.translation_file does not match its verified translation output"
+                    )
+                if document.get("translation_sha256") != translation_output.get("translation_sha256"):
+                    raise RuntimeError(
+                        f"{label}.translation_sha256 does not match its verified translation output"
+                    )
+                text_path = translation_path
+            elif text_edition == "revised-pt-br":
+                revision_output = revision_outputs.get(document_id)
+                if not isinstance(revision_output, dict):
+                    raise RuntimeError(f"{label} has no verified revised PT-BR output")
+                revised_file = document.get("revised_file")
+                revised_path = resolve_under(book_root, revised_file)
+                if (
+                    revised_path is None
+                    or not str(revised_file).replace("\\", "/").startswith(
+                        "text/revision/pt-BR/"
+                    )
+                ):
+                    raise RuntimeError(
+                        f"{label}.revised_file must resolve under text/revision/pt-BR/"
+                    )
+                if not revised_path.is_file():
+                    raise RuntimeError(f"{label}.revised_file is missing: {revised_file}")
+                if document.get("revised_sha256") != sha256_file(revised_path):
+                    raise RuntimeError(
+                        f"{label}.revised_sha256 does not match revised_file"
+                    )
+                expected_revised_path = resolve_under(
+                    text_root,
+                    revision_output.get("revised_file"),
+                )
+                if expected_revised_path is None or revised_path != expected_revised_path:
+                    raise RuntimeError(
+                        f"{label}.revised_file does not match its verified revision output"
+                    )
+                if document.get("revised_sha256") != revision_output.get(
+                    "revised_sha256"
+                ):
+                    raise RuntimeError(
+                        f"{label}.revised_sha256 does not match its verified revision output"
+                    )
+                text_path = revised_path
         asset_ids = document.get("asset_ids", [])
         if not isinstance(asset_ids, list) or any(not isinstance(asset_id, str) for asset_id in asset_ids):
             raise RuntimeError(f"{label}.asset_ids must be an array of strings")
@@ -180,7 +392,17 @@ def validate_documents(
             raise RuntimeError(f"{label}.asset_ids contain unknown assets: {unknown_assets}")
         if is_source_cover and not asset_ids:
             raise RuntimeError(f"{label} source_cover must reference at least one asset")
-        validated.append({**document, "_source_path": source_path})
+        layout_document = layout_by_document.get(document_id)
+        if not is_source_cover and isinstance(layout, dict) and not isinstance(layout_document, dict):
+            raise RuntimeError(f"{label} has no semantic EPUB layout document")
+        validated.append(
+            {
+                **document,
+                "_text_path": text_path,
+                "_layout_blocks": layout_document.get("blocks") if isinstance(layout_document, dict) else None,
+                "_revision_changes": revision_changes.get(document_id, []),
+            }
+        )
     return validated, asset_by_id
 
 
@@ -246,8 +468,9 @@ def paragraph_markup(block: str) -> str:
 
 def figure_markup(asset: dict, href: str) -> str:
     alt_text = escape(asset["alt_text"])
+    role = asset["role"] if asset["role"] in {"illustration", "facsimile"} else "illustration"
     return (
-        '    <figure class="illustration">\n'
+        f'    <figure class="illustration {role}">\n'
         f'      <img src="{escape(href)}" alt="{alt_text}"/>\n'
         "    </figure>"
     )
@@ -273,26 +496,308 @@ def source_cover_markup(document: dict, language: str, asset_hrefs: list[tuple[d
     )
 
 
-def document_markup(document: dict, language: str, asset_hrefs: list[tuple[dict, str]]) -> str:
-    if document.get("kind") == "source_cover":
-        return source_cover_markup(document, language, asset_hrefs)
-    text = document["_source_path"].read_text(encoding="utf-8")
-    heading, paragraphs = paragraphs_from_text(text, str(document["title"]))
+def _note_marker_pattern(note_ids: dict[str, str]) -> re.Pattern[str] | None:
+    if not note_ids:
+        return None
+    markers = "|".join(re.escape(marker) for marker in sorted(note_ids, key=len, reverse=True))
+    return re.compile(rf"(?P<marker>{markers})")
+
+
+def _preceding_text_character(text: str, marker_start: int) -> str:
+    index = marker_start - 1
+    while index >= 0 and text[index] in '"\')]}.,;:!?—–-”’':
+        index -= 1
+    return text[index] if index >= 0 else ""
+
+
+def _is_attached_note_marker(text: str, start: int, end: int, marker: str) -> bool:
+    preceding = _preceding_text_character(text, start)
+    if not preceding or preceding.isspace():
+        return False
+    following = text[end] if end < len(text) else ""
+    if following and following.isalnum():
+        return False
+    if marker.isdigit():
+        if preceding.isalpha():
+            return True
+        if preceding.isdigit() and len(marker) == 1:
+            token_start = start - 1
+            while token_start > 0 and (
+                text[token_start - 1].isdigit() or text[token_start - 1] in "/-"
+            ):
+                token_start -= 1
+            return (
+                re.fullmatch(r"\d{1,2}[/-]\d{1,2}[/-]\d{4}", text[token_start:start])
+                is not None
+            )
+        return False
+    return preceding.isalnum()
+
+
+def _attached_note_matches(text: str, note_ids: dict[str, str]) -> list[tuple[int, int, str, str]]:
+    pattern = _note_marker_pattern(note_ids)
+    if pattern is None:
+        return []
+    matches: list[tuple[int, int, str, str]] = []
+    for match in pattern.finditer(text):
+        marker = match.group("marker")
+        if _is_attached_note_marker(text, match.start(), match.end(), marker):
+            matches.append((match.start(), match.end(), marker, note_ids[marker]))
+    return matches
+
+
+def _noteref_id(note_id: str, reference_counts: dict[str, int]) -> str:
+    reference_counts[note_id] = reference_counts.get(note_id, 0) + 1
+    suffix = "" if reference_counts[note_id] == 1 else f"-{reference_counts[note_id]}"
+    return f"noteref-{note_id}{suffix}"
+
+
+def note_reference_markup(
+    value: str,
+    note_ids: dict[str, str],
+    reference_targets: dict[str, str] | None = None,
+    reference_counts: dict[str, int] | None = None,
+    normalize: bool = True,
+    note_hrefs: dict[str, str] | None = None,
+) -> str:
+    text = normalize_space(value) if normalize else value
+    if not note_ids:
+        return escape(text)
+    targets = reference_targets if reference_targets is not None else {}
+    counts = reference_counts if reference_counts is not None else {}
+    parts: list[str] = []
+    cursor = 0
+    for start, end, marker, note_id in _attached_note_matches(text, note_ids):
+        parts.append(escape(text[cursor:start]))
+        ref_id = _noteref_id(note_id, counts)
+        targets.setdefault(note_id, ref_id)
+        href = (note_hrefs or {}).get(note_id, f"#{note_id}")
+        parts.append(
+            f'<sup><a id="{escape(ref_id)}" epub:type="noteref" href="{escape(href)}">'
+            f"{escape(marker)}</a></sup>"
+        )
+        cursor = end
+    parts.append(escape(text[cursor:]))
+    return "".join(parts)
+
+
+def _apply_revision_changes(
+    value: str,
+    changes: list[dict],
+    applied: set[str] | None = None,
+) -> str:
+    revised = value
+    for change in changes:
+        source_span = str(change.get("source_span") or "")
+        revised_span = str(change.get("revised_span") or "")
+        change_id = str(change.get("id") or "")
+        if not source_span or source_span not in revised:
+            continue
+        if revised.count(source_span) != 1:
+            raise RuntimeError(
+                f"Revision change {change_id!r} is ambiguous inside one semantic EPUB block."
+            )
+        if applied is not None and change_id in applied:
+            raise RuntimeError(
+                f"Revision change {change_id!r} appears in more than one semantic EPUB block."
+            )
+        revised = revised.replace(source_span, revised_span, 1)
+        if applied is not None:
+            applied.add(change_id)
+    return revised
+
+
+def _layout_text_values(
+    block: dict,
+    book_root: Path,
+    revision_changes: list[dict] | None = None,
+    applied: set[str] | None = None,
+) -> list[str]:
+    lines = lines_for_block(block, book_root)
+    kind = block["kind"]
+    changes = revision_changes or []
+    if kind in {"paragraph", "dialogue", "note"}:
+        return [_apply_revision_changes(" ".join(lines), changes, applied)]
+    if kind in {"verse", "heading"}:
+        return [_apply_revision_changes(line, changes, applied) for line in lines]
+    return lines
+
+
+def _note_reference_targets(
+    blocks: list[dict],
+    book_root: Path,
+    note_ids: dict[str, str],
+    revision_changes: list[dict],
+) -> dict[str, str]:
+    targets: dict[str, str] = {}
+    for block in blocks:
+        if not isinstance(block, dict) or block.get("kind") == "note":
+            continue
+        for value in _layout_text_values(block, book_root, revision_changes):
+            for _, _, _, note_id in _attached_note_matches(normalize_space(value), note_ids):
+                targets.setdefault(note_id, f"noteref-{note_id}")
+    return targets
+
+
+def semantic_block_markup(
+    block: dict,
+    book_root: Path,
+    note_ids: dict[str, str],
+    reference_targets: dict[str, str],
+    reference_counts: dict[str, int],
+    revision_changes: list[dict],
+    applied_revision_ids: set[str],
+    note_hrefs: dict[str, str] | None = None,
+) -> str:
+    kind = block["kind"]
+    lines = _layout_text_values(
+        block,
+        book_root,
+        revision_changes,
+        applied_revision_ids,
+    )
+    if kind == "paragraph":
+        return f"    <p>{note_reference_markup(' '.join(lines), note_ids, reference_targets, reference_counts, note_hrefs=note_hrefs)}</p>"
+    if kind == "dialogue":
+        return f'    <p class="dialogue">{note_reference_markup(" ".join(lines), note_ids, reference_targets, reference_counts, note_hrefs=note_hrefs)}</p>'
+    if kind == "verse":
+        verse_lines = "\n".join(
+            f'      <span class="verse-line">{note_reference_markup(line, note_ids, reference_targets, reference_counts, normalize=False, note_hrefs=note_hrefs)}</span>'
+            for line in lines
+        )
+        return f'    <div class="verse">\n{verse_lines}\n    </div>'
+    if kind == "heading":
+        level = block["level"]
+        heading_lines = "\n".join(
+            f'      <span class="heading-line">{note_reference_markup(line, note_ids, reference_targets, reference_counts, normalize=False, note_hrefs=note_hrefs)}</span>'
+            for line in lines
+        )
+        return f'    <h{level} class="source-heading">\n{heading_lines}\n    </h{level}>'
+    if kind == "note":
+        marker = block["marker"]
+        note_id = str(block["id"])
+        first_line = lines[0]
+        content = re.sub(rf"^\s*{re.escape(marker)}\s+", "", first_line)
+        note_lines = [content, *lines[1:]]
+        marker_markup = escape(marker)
+        if note_id in reference_targets:
+            backlink = str(reference_targets[note_id])
+            if "#" not in backlink:
+                backlink = f"#{backlink}"
+            marker_markup = (
+                f'<a epub:type="backlink" href="{escape(backlink)}">'
+                f"{escape(marker)}</a>"
+            )
+        return (
+            f'    <aside id="{escape(note_id)}" epub:type="footnote" class="footnote">\n'
+            f"      <p><sup>{marker_markup}</sup> {escape(normalize_space(' '.join(note_lines)))}</p>\n"
+            "    </aside>"
+        )
+    raise RuntimeError(f"Unsupported EPUB layout block kind: {kind}")
+
+
+def semantic_body_parts(
+    blocks: list[dict],
+    book_root: Path,
+    asset_hrefs: list[tuple[dict, str]],
+    revision_changes: list[dict] | None = None,
+    global_note_ids: dict[str, str] | None = None,
+    note_hrefs: dict[str, str] | None = None,
+    global_reference_targets: dict[str, str] | None = None,
+) -> list[str]:
     before = [figure_markup(asset, href) for asset, href in asset_hrefs if asset["placement"] != "end"]
     after = [figure_markup(asset, href) for asset, href in asset_hrefs if asset["placement"] == "end"]
-    body_parts = [f"    <h1>{escape(heading)}</h1>", *before]
-    body_parts.extend(paragraph_markup(paragraph) for paragraph in paragraphs)
-    body_parts.extend(after)
+    parts: list[str] = []
+    inserted_before = False
+    local_note_ids = {
+        str(block["marker"]): str(block["id"])
+        for block in blocks
+        if block.get("kind") == "note"
+    }
+    note_ids = global_note_ids or local_note_ids
+    changes = revision_changes or []
+    reference_targets = (
+        dict(global_reference_targets)
+        if global_reference_targets is not None
+        else _note_reference_targets(blocks, book_root, note_ids, changes)
+    )
+    reference_counts: dict[str, int] = {}
+    applied_revision_ids: set[str] = set()
+    for block in blocks:
+        parts.append(
+            semantic_block_markup(
+                block,
+                book_root,
+                note_ids,
+                reference_targets,
+                reference_counts,
+                changes,
+                applied_revision_ids,
+                note_hrefs,
+            )
+        )
+        if before and not inserted_before and block["kind"] == "heading":
+            parts.extend(before)
+            inserted_before = True
+    if before and not inserted_before:
+        parts = [*before, *parts]
+    parts.extend(after)
+    expected_revision_ids = {
+        str(change.get("id"))
+        for change in changes
+        if isinstance(change, dict) and isinstance(change.get("id"), str)
+    }
+    if applied_revision_ids != expected_revision_ids:
+        missing = sorted(expected_revision_ids - applied_revision_ids)
+        raise RuntimeError(
+            "Approved revision changes are not represented by the semantic EPUB layout: "
+            f"{missing}"
+        )
+    return parts
+
+
+def document_markup(
+    document: dict,
+    language: str,
+    asset_hrefs: list[tuple[dict, str]],
+    book_root: Path,
+    global_note_ids: dict[str, str] | None = None,
+    note_hrefs: dict[str, str] | None = None,
+    global_reference_targets: dict[str, str] | None = None,
+) -> str:
+    if document.get("kind") == "source_cover":
+        return source_cover_markup(document, language, asset_hrefs)
+    layout_blocks = document.get("_layout_blocks")
+    if isinstance(layout_blocks, list):
+        body_parts = semantic_body_parts(
+            layout_blocks,
+            book_root,
+            asset_hrefs,
+            document.get("_revision_changes") or [],
+            global_note_ids,
+            note_hrefs,
+            global_reference_targets,
+        )
+        section_class = ' class="semantic-layout"'
+    else:
+        text = document["_text_path"].read_text(encoding="utf-8")
+        heading, paragraphs = paragraphs_from_text(text, str(document["title"]))
+        before = [figure_markup(asset, href) for asset, href in asset_hrefs if asset["placement"] != "end"]
+        after = [figure_markup(asset, href) for asset, href in asset_hrefs if asset["placement"] == "end"]
+        body_parts = [f"    <h1>{escape(heading)}</h1>", *before]
+        body_parts.extend(paragraph_markup(paragraph) for paragraph in paragraphs)
+        body_parts.extend(after)
+        section_class = ' class="legacy-layout"'
     return "\n".join(
         [
             '<?xml version="1.0" encoding="utf-8"?>',
-            f'<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="{escape(language)}" lang="{escape(language)}">',
+            f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" xml:lang="{escape(language)}" lang="{escape(language)}">',
             "<head>",
             f"  <title>{escape(document['title'])}</title>",
             '  <link rel="stylesheet" type="text/css" href="../styles/book.css"/>',
             "</head>",
             "<body>",
-            "  <section>",
+            f"  <section{section_class}>",
             *body_parts,
             "  </section>",
             "</body>",
@@ -469,8 +974,10 @@ def opf_markup(
 
 def write_epub(
     output: Path,
+    book_root: Path,
     book: dict,
     language: str,
+    text_edition: str,
     documents: list[dict],
     selected_assets_by_document: dict[str, list[dict]],
     visual_profile: dict | None,
@@ -479,6 +986,42 @@ def write_epub(
     for index, document in enumerate(documents, start=1):
         href = f"text/{index:03d}-{safe_segment(str(document['id']), f'document-{index:03d}')}.xhtml"
         document_hrefs.append((document, href))
+    document_href_by_id = {
+        str(document["id"]): href for document, href in document_hrefs
+    }
+    global_note_ids: dict[str, str] = {}
+    note_document_hrefs: dict[str, str] = {}
+    for document, href in document_hrefs:
+        blocks = document.get("_layout_blocks")
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("kind") != "note":
+                continue
+            marker = str(block["marker"])
+            note_id = str(block["id"])
+            if marker in global_note_ids or note_id in note_document_hrefs:
+                raise RuntimeError("Semantic EPUB note markers and identifiers must be globally unique.")
+            global_note_ids[marker] = note_id
+            note_document_hrefs[note_id] = href
+    global_reference_targets: dict[str, str] = {}
+    for document, href in document_hrefs:
+        blocks = document.get("_layout_blocks")
+        if not isinstance(blocks, list):
+            continue
+        changes = document.get("_revision_changes") or []
+        for block in blocks:
+            if not isinstance(block, dict) or block.get("kind") == "note":
+                continue
+            for value in _layout_text_values(block, book_root, changes):
+                for _, _, _, note_id in _attached_note_matches(
+                    normalize_space(value),
+                    global_note_ids,
+                ):
+                    global_reference_targets.setdefault(
+                        note_id,
+                        f"{PurePosixPath(href).name}#noteref-{note_id}",
+                    )
     image_hrefs: list[tuple[dict, str]] = []
     seen_asset_ids: set[str] = set()
     for document in documents:
@@ -489,7 +1032,10 @@ def write_epub(
             suffix = asset["path"].suffix.lower() or ".img"
             image_hrefs.append((asset, f"images/{safe_segment(asset['id'], 'asset')}{suffix}"))
     image_href_by_id = {asset["id"]: href for asset, href in image_hrefs}
-    book_id = f"urn:uuid:{hashlib.sha256(json.dumps(book, sort_keys=True).encode('utf-8')).hexdigest()[:32]}"
+    book_id = (
+        "urn:uuid:"
+        f"{hashlib.sha256(json.dumps({'book': book, 'text_edition': text_edition}, sort_keys=True).encode('utf-8')).hexdigest()[:32]}"
+    )
     presentation_resources = profile_resources(visual_profile)
     cover_bytes = cover_image(book) if visual_profile else None
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -525,9 +1071,34 @@ def write_epub(
         for document, href in document_hrefs:
             assets = selected_assets_by_document[document["id"]]
             references = [(asset, f"../{image_href_by_id[asset['id']]}") for asset in assets]
+            current_name = PurePosixPath(href).name
+            note_hrefs = {
+                note_id: (
+                    f"#{note_id}"
+                    if PurePosixPath(target_href).name == current_name
+                    else f"{PurePosixPath(target_href).name}#{note_id}"
+                )
+                for note_id, target_href in note_document_hrefs.items()
+            }
+            reference_targets = {
+                note_id: (
+                    target.split("#", 1)[1]
+                    if target.startswith(f"{current_name}#")
+                    else target
+                )
+                for note_id, target in global_reference_targets.items()
+            }
             archive.writestr(
                 f"OEBPS/{href}",
-                document_markup(document, language, references),
+                document_markup(
+                    document,
+                    language,
+                    references,
+                    book_root,
+                    global_note_ids,
+                    note_hrefs,
+                    reference_targets,
+                ),
                 compress_type=zipfile.ZIP_DEFLATED,
             )
         archive.writestr(
@@ -592,6 +1163,7 @@ def main() -> None:
     parser.add_argument("--epub-manifest", type=Path)
     parser.add_argument("--assets-manifest", type=Path)
     parser.add_argument("--image-edition", choices=sorted(IMAGE_EDITIONS), default="original")
+    parser.add_argument("--text-edition", choices=sorted(TEXT_EDITIONS), default="original")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -600,17 +1172,49 @@ def main() -> None:
         epub_manifest_path = (
             args.epub_manifest.expanduser().resolve()
             if args.epub_manifest
-            else book_root / "metadata" / "epub-manifest.json"
+            else book_root
+            / "metadata"
+            / (
+                "epub-manifest.pt-br.json"
+                if args.text_edition == "translated-pt-br"
+                else (
+                    "epub-manifest.revised.json"
+                    if args.text_edition == "revised-pt-br"
+                    else "epub-manifest.json"
+                )
+            )
         )
         assets_manifest_path = (
             args.assets_manifest.expanduser().resolve()
             if args.assets_manifest
             else book_root / "metadata" / "assets-manifest.json"
         )
-        book_map, ledger, assets_manifest, epub_manifest, map_path, ledger_path = load_export_context(
-            book_root, epub_manifest_path, assets_manifest_path
+        (
+            book_map,
+            ledger,
+            assets_manifest,
+            epub_manifest,
+            map_path,
+            ledger_path,
+            translation_ledger,
+            revision_ledger,
+            layout,
+        ) = load_export_context(
+            book_root,
+            epub_manifest_path,
+            assets_manifest_path,
+            args.text_edition,
         )
-        documents, asset_by_id = validate_documents(book_root, epub_manifest, assets_manifest, ledger)
+        documents, asset_by_id = validate_documents(
+            book_root,
+            epub_manifest,
+            assets_manifest,
+            ledger,
+            args.text_edition,
+            translation_ledger,
+            revision_ledger,
+            layout,
+        )
         selected_assets_by_document = {
             document["id"]: [
                 selected_asset(asset_by_id[asset_id], book_root, args.image_edition)
@@ -630,7 +1234,12 @@ def main() -> None:
             "publication_year": book.get("publication_year"),
             "publication_place": str(book.get("publication_place") or ""),
         }
-        edition_label = "fiel" if args.image_edition == "original" else "restaurada"
+        if args.text_edition == "original":
+            edition_label = "fiel" if args.image_edition == "original" else "restaurada"
+        elif args.text_edition == "revised-pt-br":
+            edition_label = "revisada" if args.image_edition == "original" else "revisada-restaurada"
+        else:
+            edition_label = "pt-br" if args.image_edition == "original" else "pt-br-restaurada"
         if visual_profile:
             edition_label = f"{edition_label}-classico"
         output = resolve_export_output(
@@ -640,8 +1249,10 @@ def main() -> None:
         )
         assets, presentation = write_epub(
             output,
+            book_root,
             book,
             str(epub_manifest["language"]),
+            args.text_edition,
             documents,
             selected_assets_by_document,
             visual_profile,
@@ -652,11 +1263,22 @@ def main() -> None:
             "epub_path": relative_to_book(book_root, output),
             "epub_sha256": sha256_file(output),
             "image_edition": args.image_edition,
+            "text_edition": args.text_edition,
+            "language": epub_manifest["language"],
             "book_map_sha256": sha256_file(map_path),
             "text_ledger_sha256": sha256_file(ledger_path),
             "assets_manifest_sha256": sha256_file(assets_manifest_path),
             "assets": assets,
         }
+        if args.text_edition == "translated-pt-br":
+            sidecar_data["source_language"] = epub_manifest["source_language"]
+            sidecar_data["translation_ledger_sha256"] = epub_manifest["translation_ledger_sha256"]
+        elif args.text_edition == "revised-pt-br":
+            sidecar_data["revision_ledger_sha256"] = epub_manifest[
+                "revision_ledger_sha256"
+            ]
+        if isinstance(layout, dict):
+            sidecar_data["layout"] = epub_manifest["layout"]
         if presentation:
             sidecar_data["visual_profile"] = presentation
         write_json(sidecar, sidecar_data)

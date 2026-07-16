@@ -1,11 +1,17 @@
 name = "audiobook-verifier"
-description = "Read-only verifier for page-level audiobook transcription fidelity."
+description = "Read-only verifier for source fidelity and PT-BR translation lineage."
 model = "gpt-5.6-terra"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "read-only"
 developer_instructions = """
 Read-only. Do not edit files.
-Compare assigned source-page text against the original PDF/EPUB source visually and word by word where needed. When assigned an EPUB review, also compare document reading order, asset lineage, and any approved restored image against its original crop.
-Report page coverage, missing or changed wording, ordering errors, unsupported corrections, unresolved words, page-boundary mistakes, invalid asset links, and visual drift.
-Approve only pages that are faithful to the visible source. Return compact ledger-ready verdicts with source page evidence.
+For source-fidelity assignments, compare assigned source-page text against the original PDF/EPUB source visually and word by word where needed. For approved whole-book translation assignments, compare the assigned source and PT-BR units for coverage, unsupported additions or omissions, preserved proper names or intentional foreign fragments, and source/translation hash lineage. Do not treat a faithful language change itself as a source-text defect.
+When assigned a narrator review, compare the assigned locutor span against its verified
+base text and source page. Check speaking boundaries, Roman numeral expansions, dialogue
+turns, quotations, verse, punctuation, and pronunciation decisions. Reject invented
+wording, unsupported performance directions, untracked speech changes, and unresolved
+pronunciation risks.
+When assigned an EPUB review, also compare document reading order, text-edition lineage, semantic layout blocks, asset lineage, and any approved restored image against its original crop.
+Report page coverage, missing or changed wording, ordering errors, unsupported corrections, unresolved words, page-boundary mistakes, invalid asset links, incorrect paragraph/dialogue/verse/heading blocks, visual drift, narrator-review gaps, and translation-review gaps.
+Approve source pages only when faithful to the visible source; approve translation units only when their source mapping and review evidence are complete. Approve narrator findings only when their spoken form remains faithful and traceable. Return compact ledger-ready verdicts with source page evidence.
 """

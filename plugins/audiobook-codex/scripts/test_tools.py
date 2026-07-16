@@ -6,11 +6,15 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
+import wave
 import zipfile
+
+from validate_epub_export import validate_epub_document_texts
 
 
 ROOT = Path(__file__).resolve().parent
@@ -36,6 +40,109 @@ def run_fails(*args: str) -> None:
 
 def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def write_json(path: Path, data: object) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def translation_ledger_for(
+    book_map_path: Path,
+    source_ledger_path: Path,
+    source_ledger: dict,
+    text_root: Path,
+    source_language: str,
+    book_title: str,
+    document_title_by_id: dict[str, str],
+) -> dict:
+    pages = []
+    for source_page in source_ledger["pages"]:
+        translation_page = (
+            text_root
+            / "translation"
+            / "pt-BR"
+            / "pages"
+            / Path(source_page["source_file"]).name
+        )
+        translation_page.parent.mkdir(parents=True, exist_ok=True)
+        translation_page.write_text(
+            f"Texto traduzido da pagina {source_page['logical_page']}.",
+            encoding="utf-8",
+        )
+        pages.append(
+            {
+                "logical_page": source_page["logical_page"],
+                "status": source_page["status"],
+                "source_file": source_page["source_file"],
+                "source_sha256": source_page["source_sha256"],
+                "translation_file": translation_page.relative_to(text_root).as_posix(),
+                "translation_sha256": sha256_file(translation_page),
+                "translated_by": "codex",
+                "reviewed_by": "codex",
+                "notes": "",
+            }
+        )
+
+    chapter_outputs = []
+    for source_output in source_ledger["chapter_outputs"]:
+        translation_file = (
+            text_root
+            / "translation"
+            / "pt-BR"
+            / "chapters"
+            / Path(source_output["source_file"]).name
+        )
+        translation_file.parent.mkdir(parents=True, exist_ok=True)
+        translation_file.write_text(
+            f"{document_title_by_id[source_output['id']]}\n\nTexto traduzido para PT-BR.",
+            encoding="utf-8",
+        )
+        chapter_outputs.append(
+            {
+                "id": source_output["id"],
+                "source_file": source_output["source_file"],
+                "source_sha256": source_output["source_sha256"],
+                "translation_file": translation_file.relative_to(text_root).as_posix(),
+                "translation_sha256": sha256_file(translation_file),
+                "source_pages": copy.deepcopy(source_output["source_pages"]),
+                "translated_by": "codex",
+                "reviewed_by": "codex",
+            }
+        )
+
+    return {
+        "schema_version": "1.0",
+        "book_map_sha256": sha256_file(book_map_path),
+        "text_ledger_sha256": sha256_file(source_ledger_path),
+        "source_language": source_language,
+        "target_language": "pt-BR",
+        "translation_decision": {
+            "scope": "whole-book",
+            "reason": "The source work is fully non-Portuguese.",
+            "reviewed_by": "codex",
+            "evidence": [
+                {
+                    "logical_page": source_page["logical_page"],
+                    "source_sha256": source_page["source_sha256"],
+                    "source_span": (
+                        text_root / source_page["source_file"]
+                    ).read_text(encoding="utf-8"),
+                    "reason": "Reviewed as part of the whole source-language decision.",
+                }
+                for source_page in source_ledger["pages"]
+                if source_page["status"] == "verified"
+            ],
+        },
+        "pages": pages,
+        "chapter_outputs": chapter_outputs,
+        "edition": {
+            "book": {"title": book_title, "subtitle": ""},
+            "document_titles": [
+                {"id": output_id, "title": title}
+                for output_id, title in document_title_by_id.items()
+            ],
+        },
+    }
 
 
 def write_epub(path: Path) -> None:
@@ -93,18 +200,56 @@ def create_junction(link: Path, target: Path) -> None:
 
 
 def main() -> None:
-    from audio_tools import SAMPLE_RATE, transcode, write_wav
+    from audio_tools import (
+        DEFAULT_PUBLICATION_TEMPO,
+        SAMPLE_RATE,
+        apply_publication_tempo,
+        join_wavs,
+        transcode,
+        validate_publication_tempo,
+        validate_speech_wav,
+        write_wav,
+    )
+    from chapter_audio import assemble_chapters
+    from epub_layout import validate_layout
     from path_safety import resolve_under
     from pypdf import PdfWriter
     from chatterbox_text import DEFAULT_MAX_CHARS, NarratorTextError, prepare_chatterbox_segments
+    from narration_plan import (
+        SourceUnit,
+        _locutor_units,
+        _segments_for_unit,
+        _source_units,
+        normalized_text as narration_normalized_text,
+    )
+    from narrator_quality import (
+        QUALITY_PROFILE,
+        audit_text,
+        classify_finding,
+        classify_locution_line,
+        draft_review,
+        roman_to_pt_br,
+    )
+    import render_chatterbox as render_chatterbox_module
     from render_chatterbox import (
         DEFAULT_MODEL_ROOT,
         DEFAULT_REFERENCE_VOICE,
         FEMININA_PROFILE,
         FEMININA_PROFILE_CALIBRATION,
+        compatible_render_identity,
+        copy_or_link_atomically,
+        load_render_journal,
+        new_render_journal,
+        prepare_reflow_reuse_sources,
+        reflow_reuse_provenance,
+        reusable_segment_record,
         selected_profile,
+        segment_record,
+        segment_seed,
     )
     from validate_book_map import validate_book_map
+    from validate_chapter_audio import validate_chapter_audio
+    from validate_narrator_quality import validate_review
 
     assert os.environ["HF_HUB_OFFLINE"] == "1"
     assert os.environ["TRANSFORMERS_OFFLINE"] == "1"
@@ -158,6 +303,30 @@ def main() -> None:
             calibrated_version,
         )
         == "custom"
+    )
+    assert compatible_render_identity(
+        {
+            "engine": "test",
+            "runtime": {"renderer_sha256": "a"},
+            "generation": {"seed": 1},
+        },
+        {
+            "engine": "test",
+            "runtime": {"renderer_sha256": "b"},
+            "generation": {"seed": 1},
+        },
+    )
+    assert not compatible_render_identity(
+        {
+            "engine": "test",
+            "runtime": {"renderer_sha256": "a"},
+            "generation": {"seed": 1},
+        },
+        {
+            "engine": "test",
+            "runtime": {"renderer_sha256": "b"},
+            "generation": {"seed": 2},
+        },
     )
     profile_args.silence_seconds = FEMININA_PROFILE["silence_seconds"]
     assert (
@@ -217,6 +386,8 @@ def main() -> None:
         "Visite https://example.com.",
         "Visite exemplo.com.",
         "Isso e etc.",
+        "XII.",
+        "Capítulo XXIII.",
         "X" * (DEFAULT_MAX_CHARS + 1),
     ):
         try:
@@ -225,9 +396,757 @@ def main() -> None:
             pass
         else:
             raise AssertionError(f"Expected Chatterbox narrator text to fail: {invalid_text!r}")
+    assert [item.text for item in prepare_chatterbox_segments("civil.\nCapítulo civil.", DEFAULT_MAX_CHARS)] == [
+        "civil.",
+        "Capítulo civil.",
+    ]
+    fluent_paragraph = (
+        "Como tudo tem a hora certa para acontecer, me parece que os Cem Anos de Umbanda "
+        "marca um interesse renovado dos umbandistas pela história. Da Umbanda e como não "
+        "poderia deixar de ser Leal de Souza é o principal marco, depois de Zélio de Moraes "
+        "e o Caboclo das Sete Encruzilhadas."
+    )
+    fluent_segments = _segments_for_unit(
+        SourceUnit(fluent_paragraph, "paragraph"),
+        fluent_paragraph,
+        DEFAULT_MAX_CHARS,
+    )
+    assert fluent_segments == [(fluent_paragraph, "paragraph")]
+    long_sentence = (
+        "Esta é uma frase deliberadamente longa; A segunda oração começa em maiúscula e mantém "
+        "o sentido. A terceira oração também começa em maiúscula e permite uma quebra segura "
+        "quando o limite do narrador for alcançado."
+    )
+    long_segments = _segments_for_unit(
+        SourceUnit(long_sentence, "paragraph"),
+        long_sentence,
+        120,
+    )
+    assert all(len(text) <= 120 for text, _ in long_segments)
+    assert narration_normalized_text(" ".join(text for text, _ in long_segments)) == long_sentence
+    expansion_units = _locutor_units(
+        "Antes 1925.\n1 Nota final.",
+        "Antes mil novecentos e vinte e cinco. Nota um. Nota final.",
+    )
+    assert "mil novecentos e vinte e cinco" in expansion_units[0][1]
+    assert not expansion_units[0][1].endswith(" e")
+    wrapped_dialogue_units = _source_units(
+        "- Você acha que o espiritismo não pode ser pago. Mas quem não tem\n"
+        "emprego, como é que há de fazer espiritismo?\n"
+        "E, continuando, desenvolveu o argumento."
+    )
+    assert [
+        (unit.text, unit.role)
+        for unit in wrapped_dialogue_units
+    ] == [
+        (
+            "- Você acha que o espiritismo não pode ser pago. Mas quem não tem "
+            "emprego, como é que há de fazer espiritismo?",
+            "dialogue",
+        ),
+        ("E, continuando, desenvolveu o argumento.", "paragraph"),
+    ]
+
+    quality_text = (
+        "XXII.\n"
+        "Capítulo XXIII.\n"
+        "Ele respondeu.. Sim!.\n"
+        "vi o caminho.\n"
+        "mil histórias de uma cidade civil.\n"
+        "Sr. João chegou em 12/03/2026 às 14:30, com 15%.\n"
+        "Esta frase continua\n"
+        "em outra linha.\n"
+        "— Quem está aí?.\n"
+        "Verso terminado.\n"
+        "> Citação encerrada..\n"
+        "ABC."
+    )
+    quality_findings = audit_text(quality_text)
+    quality_lines = quality_text.splitlines()
+    quality_kinds = [finding.kind for finding in quality_findings]
+    assert quality_kinds.count("roman_heading") == 1
+    assert quality_kinds.count("labelled_roman_numeral") == 1
+    assert quality_kinds.count("punctuation_cluster") == 4
+    assert "abbreviation" in quality_kinds
+    assert "date_or_time" in quality_kinds
+    assert "raw_number" in quality_kinds
+    assert "spoken_symbol" in quality_kinds
+    assert any(
+        finding.kind == "line_boundary" and finding.locutor_span == "em outra linha."
+        for finding in quality_findings
+    )
+    assert any(
+        finding.kind == "uppercase_token" and finding.locutor_span == "ABC"
+        for finding in quality_findings
+    )
+    assert roman_to_pt_br("XXII") == "vinte e dois"
+    assert roman_to_pt_br("Xxiii") == "vinte e três"
+    assert roman_to_pt_br("civil") is None
+    assert not any(
+        finding.kind in {"roman_heading", "labelled_roman_numeral"}
+        and finding.line_number in {4, 5}
+        for finding in quality_findings
+    )
+    assert classify_finding(quality_findings[0], quality_lines) == "heading"
+    assert any(
+        classify_finding(finding, quality_lines) == "dialogue"
+        for finding in quality_findings
+        if finding.line_number == 9
+    )
+    assert any(
+        classify_finding(finding, quality_lines) == "quotation"
+        for finding in quality_findings
+        if finding.line_number == 11
+    )
+    assert classify_locution_line(["Capítulo vinte e dois."], 0) == "heading"
+    assert classify_locution_line(["— Uma fala completa."], 0) == "dialogue"
+    assert classify_locution_line(['"Uma citação."'], 0) == "quotation"
+    assert classify_locution_line(["Nota do editor."], 0) == "note"
+    assert classify_locution_line(["1. Primeiro item."], 0) == "list"
+    assert classify_locution_line(["Primeiro verso", "Segundo verso"], 0) == "verse"
+    assert classify_locution_line(["O PDF E O EPUB ESTÃO PRONTOS."], 0) == "prose"
+    assert classify_locution_line([""], 0) == "excluded"
 
     with tempfile.TemporaryDirectory(prefix="audiobook-codex-test-") as temporary:
         root = Path(temporary)
+        resume_output = root / "resume-output"
+        resume_segments = resume_output / "segments"
+        resume_segments.mkdir(parents=True)
+        resume_segment_path = resume_segments / "segment-0001.wav"
+        speech_frames = b"\x00\x10" * SAMPLE_RATE
+        silent_frames = b"\x00\x00" * SAMPLE_RATE
+        write_wav(resume_segment_path, speech_frames)
+        joined_path = root / "variable-pauses.wav"
+        second_joined_path = root / "variable-pauses-second.wav"
+        write_wav(second_joined_path, speech_frames)
+        silent_segment_path = resume_output / "segments" / "silent.wav"
+        write_wav(silent_segment_path, silent_frames)
+        try:
+            validate_speech_wav(silent_segment_path)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected silent WAV to fail speech validation.")
+        speech_metrics = validate_speech_wav(resume_segment_path)
+        assert speech_metrics["peak_rms"] > 180
+        assert speech_metrics["longest_silence_seconds"] == 0
+        assert speech_metrics["voiced_ratio"] == 1.0
+        mostly_silent_path = resume_output / "segments" / "mostly-silent.wav"
+        mostly_silent_frames = bytearray()
+        for _ in range(10):
+            mostly_silent_frames.extend(b"\x00\x10" * int(SAMPLE_RATE * 0.05))
+            mostly_silent_frames.extend(b"\x00\x00" * int(SAMPLE_RATE * 0.95))
+        write_wav(mostly_silent_path, bytes(mostly_silent_frames))
+        try:
+            validate_speech_wav(mostly_silent_path)
+        except RuntimeError as error:
+            assert "voiced ratio" in str(error)
+        else:
+            raise AssertionError("Expected mostly silent WAV to fail speech validation.")
+        retry_segment = SimpleNamespace(
+            line_number=7,
+            text="Retry render.",
+            warnings=(),
+        )
+        retry_path = resume_output / "segments" / "retry.wav"
+        render_calls: list[int] = []
+        seed_calls: list[tuple[int | None, str]] = []
+        original_render_segment = render_chatterbox_module.render_segment
+        original_seed_torch = render_chatterbox_module.seed_torch
+        try:
+            def fake_seed_torch(value: int | None, device: str) -> None:
+                seed_calls.append((value, device))
+
+            def fake_render_segment(*args: object, **kwargs: object) -> None:
+                target = args[2]
+                if not isinstance(target, Path):
+                    raise AssertionError("Expected render target path.")
+                render_calls.append(len(render_calls) + 1)
+                write_wav(target, silent_frames if len(render_calls) == 1 else speech_frames)
+
+            render_chatterbox_module.seed_torch = fake_seed_torch
+            render_chatterbox_module.render_segment = fake_render_segment
+            accepted_seed, attempts = render_chatterbox_module.render_segment_with_retries(
+                segment_index=7,
+                model=object(),
+                text=retry_segment.text,
+                target=retry_path,
+                voice_reference=root / "voice.wav",
+                exaggeration=0.0,
+                cfg_weight=0.0,
+                temperature=0.0,
+                repetition_penalty=0.0,
+                min_p=0.0,
+                top_p=0.0,
+                seed=100,
+                device="cpu",
+            )
+        finally:
+            render_chatterbox_module.render_segment = original_render_segment
+            render_chatterbox_module.seed_torch = original_seed_torch
+        assert accepted_seed == render_chatterbox_module.render_retry_seed(100, 7, 1)
+        assert seed_calls == [(100, "cpu"), (accepted_seed, "cpu")]
+        assert attempts[0]["status"] == "rejected"
+        assert attempts[0]["seed"] == 100
+        assert "reason" in attempts[0]
+        assert attempts[1]["status"] == "accepted"
+        retry_record = segment_record(
+            7,
+            retry_segment,
+            retry_path,
+            resume_output,
+            accepted_seed,
+            attempts,
+        )
+        assert reusable_segment_record(
+            retry_record,
+            7,
+            retry_segment,
+            retry_path,
+            resume_output,
+            100,
+        )
+        joined_duration = join_wavs(
+            [resume_segment_path, second_joined_path],
+            joined_path,
+            boundary_pauses=[0.05],
+        )
+        assert abs(joined_duration - 2.05) < 0.0001
+        tempo_path = root / "publication-tempo.wav"
+        apply_publication_tempo(joined_path, tempo_path, DEFAULT_PUBLICATION_TEMPO)
+        with wave.open(str(tempo_path), "rb") as rendered:
+            tempo_duration = rendered.getnframes() / rendered.getframerate()
+        assert abs(tempo_duration - joined_duration / DEFAULT_PUBLICATION_TEMPO) < 0.05
+        assert validate_publication_tempo(1.10) == 1.1
+        try:
+            validate_publication_tempo(0)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected invalid publication tempo to fail.")
+        chapter_book = root / "chapter-book"
+        chapter_output = chapter_book / "audio" / "chatterbox"
+        chapter_segments = chapter_output / "segments"
+        chapter_segments.mkdir(parents=True)
+        chapter_metadata = chapter_book / "metadata"
+        chapter_metadata.mkdir(parents=True)
+        first_chapter_wav = chapter_segments / "segment-0001.wav"
+        second_chapter_wav = chapter_segments / "segment-0002.wav"
+        third_chapter_wav = chapter_segments / "segment-0003.wav"
+        write_wav(first_chapter_wav, speech_frames)
+        write_wav(second_chapter_wav, speech_frames)
+        write_wav(third_chapter_wav, speech_frames)
+        chapter_plan = {
+            "segments": [
+                {
+                    "id": "chapter-01-0001",
+                    "index": 1,
+                    "text_sha256": "a" * 64,
+                    "pause_after": {"kind": "sentence", "seconds": 0.05},
+                    "source": {
+                        "base_output_id": "chapter-01",
+                        "locutor_chapter": "locutor/chapters/chapter-01.txt",
+                        "logical_pages": [1],
+                    },
+                },
+                {
+                    "id": "chapter-01-0002",
+                    "index": 2,
+                    "text_sha256": "b" * 64,
+                    "pause_after": {"kind": "paragraph", "seconds": 0.42},
+                    "source": {
+                        "base_output_id": "chapter-01",
+                        "locutor_chapter": "locutor/chapters/chapter-01.txt",
+                        "logical_pages": [1],
+                    },
+                },
+                {
+                    "id": "chapter-02-0001",
+                    "index": 3,
+                    "text_sha256": "c" * 64,
+                    "pause_after": {"kind": "end", "seconds": 0.0},
+                    "source": {
+                        "base_output_id": "chapter-02",
+                        "locutor_chapter": "locutor/chapters/chapter-02.txt",
+                        "logical_pages": [2],
+                    },
+                },
+            ]
+        }
+        chapter_journal = {
+            "schema_version": "2.0",
+            "segment_render_identity": {"engine": "test"},
+            "segments": [
+                {
+                    "index": 1,
+                    "semantic_id": "chapter-01-0001",
+                    "text_sha256": "a" * 64,
+                    "path": "segments/segment-0001.wav",
+                    "audio_sha256": sha256_file(first_chapter_wav),
+                },
+                {
+                    "index": 2,
+                    "semantic_id": "chapter-01-0002",
+                    "text_sha256": "b" * 64,
+                    "path": "segments/segment-0002.wav",
+                    "audio_sha256": sha256_file(second_chapter_wav),
+                },
+            ],
+        }
+        chapter_manifest = assemble_chapters(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            chapter_journal,
+        )
+        completed_chapter = next(
+            entry for entry in chapter_manifest["chapters"] if entry["id"] == "chapter-01"
+        )
+        assert completed_chapter["status"] == "complete"
+        assert completed_chapter["audio"]["master_duration_seconds"] == 2.05
+        assert (
+            abs(
+                completed_chapter["audio"]["duration_seconds"]
+                - 2.05 / DEFAULT_PUBLICATION_TEMPO
+            )
+            < 0.05
+        )
+        assert (chapter_output / "chapters" / "original" / "chapter-01.wav").is_file()
+        assert (chapter_output / "chapters" / "final" / "chapter-01.mp3").is_file()
+        assert (chapter_output / "chapters" / "temp").is_dir()
+        assert not list((chapter_output / "chapters" / "original").glob(".*.tmp*"))
+        assert not list((chapter_output / "chapters" / "final").glob(".*.tmp*"))
+        incomplete_chapter = next(
+            entry for entry in chapter_manifest["chapters"] if entry["id"] == "chapter-02"
+        )
+        assert incomplete_chapter["status"] == "incomplete"
+        assert not validate_chapter_audio(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            chapter_journal,
+            chapter_manifest,
+        )
+        unplanned_silent_wav = chapter_segments / "segment-0099.wav"
+        write_wav(unplanned_silent_wav, silent_frames)
+        invalid_incomplete_journal = copy.deepcopy(chapter_journal)
+        invalid_incomplete_journal["segments"].append(
+            {
+                "index": 99,
+                "semantic_id": "unplanned-silent",
+                "text_sha256": "9" * 64,
+                "path": "segments/segment-0099.wav",
+                "audio_sha256": sha256_file(unplanned_silent_wav),
+            }
+        )
+        assert any(
+            "journal segment 99 WAV is invalid" in error
+            for error in validate_chapter_audio(
+                chapter_book,
+                chapter_output,
+                chapter_plan,
+                invalid_incomplete_journal,
+                chapter_manifest,
+            )
+        )
+        outside_chapter_output = root / "outside-chapter-output"
+        try:
+            assemble_chapters(
+                chapter_book,
+                outside_chapter_output,
+                chapter_plan,
+                chapter_journal,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected outside chapter output to fail.")
+        assert not outside_chapter_output.exists()
+        assert validate_chapter_audio(
+            chapter_book,
+            outside_chapter_output,
+            chapter_plan,
+            chapter_journal,
+            chapter_manifest,
+        )
+        junction_chapter_output = chapter_book / "audio" / "junction-output"
+        junction_segments = junction_chapter_output / "segments"
+        junction_segments.mkdir(parents=True)
+        for source in (first_chapter_wav, second_chapter_wav, third_chapter_wav):
+            shutil.copy2(source, junction_segments / source.name)
+        chapter_junction_target = root / "chapter-junction-target"
+        chapter_junction_target.mkdir()
+        create_junction(junction_chapter_output / "chapters", chapter_junction_target)
+        try:
+            assemble_chapters(
+                chapter_book,
+                junction_chapter_output,
+                chapter_plan,
+                chapter_journal,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected chapter layout junction to fail.")
+        assert not (chapter_junction_target / "original").exists()
+        assert not (chapter_junction_target / "final").exists()
+        assert not (chapter_junction_target / "temp").exists()
+        repeated_chapter_manifest = assemble_chapters(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            chapter_journal,
+            ["chapter-01"],
+        )
+        assert repeated_chapter_manifest["chapters"][0]["audio"] == completed_chapter["audio"]
+        unsafe_chapter_plan = copy.deepcopy(chapter_plan)
+        unsafe_chapter_plan["segments"][0]["source"]["base_output_id"] = "../audiobook"
+        try:
+            assemble_chapters(
+                chapter_book,
+                chapter_output,
+                unsafe_chapter_plan,
+                chapter_journal,
+            )
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected unsafe chapter ID to fail.")
+        complete_chapter_journal = copy.deepcopy(chapter_journal)
+        complete_chapter_journal["segments"].append(
+            {
+                "index": 3,
+                "semantic_id": "chapter-02-0001",
+                "text_sha256": "c" * 64,
+                "path": "segments/segment-0003.wav",
+                "audio_sha256": sha256_file(third_chapter_wav),
+            }
+        )
+        escaped_record_journal = copy.deepcopy(complete_chapter_journal)
+        escaped_record_journal["segments"][0]["path"] = "../segment-0001.wav"
+        escaped_record_manifest = assemble_chapters(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            escaped_record_journal,
+        )
+        assert next(
+            entry
+            for entry in escaped_record_manifest["chapters"]
+            if entry["id"] == "chapter-01"
+        )["status"] == "incomplete"
+        all_complete_manifest = assemble_chapters(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            complete_chapter_journal,
+        )
+        assert all(entry["status"] == "complete" for entry in all_complete_manifest["chapters"])
+        long_pause_plan = copy.deepcopy(chapter_plan)
+        long_pause_plan["segments"][0]["pause_after"]["seconds"] = 4.0
+        try:
+            assemble_chapters(
+                chapter_book,
+                chapter_output,
+                long_pause_plan,
+                complete_chapter_journal,
+            )
+        except RuntimeError as error:
+            assert "continuous silence" in str(error)
+        else:
+            raise AssertionError("Expected assembled chapter WAV validation to fail.")
+        published_master_hash = next(
+            entry
+            for entry in all_complete_manifest["chapters"]
+            if entry["id"] == "chapter-01"
+        )["audio"]["master_wav_sha256"]
+        normal_tempo_manifest = assemble_chapters(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            complete_chapter_journal,
+            publication_tempo=1.0,
+        )
+        normal_tempo_chapter = next(
+            entry
+            for entry in normal_tempo_manifest["chapters"]
+            if entry["id"] == "chapter-01"
+        )
+        assert normal_tempo_chapter["audio"]["duration_seconds"] == 2.05
+        assert normal_tempo_chapter["audio"]["master_wav_sha256"] == published_master_hash
+        assert normal_tempo_chapter["publication"]["tempo"] == 1.0
+        assert not validate_chapter_audio(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            complete_chapter_journal,
+            normal_tempo_manifest,
+        )
+        invalid_tempo_manifest = copy.deepcopy(normal_tempo_manifest)
+        invalid_tempo_manifest["publication"]["tempo"] = 1.2
+        assert validate_chapter_audio(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            complete_chapter_journal,
+            invalid_tempo_manifest,
+        )
+        invalid_plan_manifest = copy.deepcopy(normal_tempo_manifest)
+        invalid_plan_manifest["narration_plan"]["path"] = "metadata/other-plan.json"
+        assert validate_chapter_audio(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            complete_chapter_journal,
+            invalid_plan_manifest,
+        )
+        duplicate_chapter_manifest = copy.deepcopy(normal_tempo_manifest)
+        duplicate_chapter_manifest["chapters"].append(
+            copy.deepcopy(duplicate_chapter_manifest["chapters"][0])
+        )
+        assert validate_chapter_audio(
+            chapter_book,
+            chapter_output,
+            chapter_plan,
+            complete_chapter_journal,
+            duplicate_chapter_manifest,
+        )
+        changed_unselected_plan = copy.deepcopy(chapter_plan)
+        changed_unselected_plan["segments"][2]["pause_after"]["seconds"] = 0.5
+        selective_manifest = assemble_chapters(
+            chapter_book,
+            chapter_output,
+            changed_unselected_plan,
+            complete_chapter_journal,
+            ["chapter-01"],
+        )
+        assert next(
+            entry for entry in selective_manifest["chapters"] if entry["id"] == "chapter-02"
+        )["status"] == "incomplete"
+        resume_segment = SimpleNamespace(
+            line_number=3,
+            text="Locução de retomada completa.",
+            warnings=(),
+        )
+        resume_identity = {"engine": "test", "device": "cpu"}
+        resume_seed = segment_seed(20260713, 1)
+        resume_journal = new_render_journal(
+            resume_identity,
+            "locutor/book.txt",
+            "a" * 64,
+        )
+        resume_journal["segments"] = [
+            segment_record(
+                1,
+                resume_segment,
+                resume_segment_path,
+                resume_output,
+                resume_seed,
+            )
+        ]
+        resume_journal_path = root / "audio-render-journal.json"
+        write_json(resume_journal_path, resume_journal)
+        loaded_journal, loaded_records = load_render_journal(
+            resume_journal_path,
+            resume_identity,
+        )
+        assert loaded_journal["status"] == "incomplete"
+        assert reusable_segment_record(
+            loaded_records[1],
+            1,
+            resume_segment,
+            resume_segment_path,
+            resume_output,
+            resume_seed,
+        )
+        reflow_segment = SimpleNamespace(
+            line_number=2,
+            text=resume_segment.text,
+            warnings=(),
+        )
+        reflow_cache = resume_output / "segments" / ".reflow-test"
+        reflow_sources = prepare_reflow_reuse_sources(
+            loaded_records,
+            [reflow_segment],
+            resume_output,
+            reflow_cache,
+        )
+        assert len(reflow_sources) == 1
+        reflow_record, reflow_source_path = next(iter(reflow_sources.values()))
+        assert reflow_record["index"] == 1
+        assert reflow_source_path.is_file()
+        reflow_target = resume_segments / "segment-0002.wav"
+        copy_or_link_atomically(reflow_source_path, reflow_target)
+        reflow_seed = segment_seed(20260713, 2)
+        reused_reflow_record = segment_record(
+            2,
+            reflow_segment,
+            reflow_target,
+            resume_output,
+            reflow_record["seed"],
+        )
+        reused_reflow_record["reused_from"] = reflow_reuse_provenance(
+            reflow_record,
+            reflow_seed,
+        )
+        assert reusable_segment_record(
+            reused_reflow_record,
+            2,
+            reflow_segment,
+            reflow_target,
+            resume_output,
+            reflow_seed,
+        )
+        assert reused_reflow_record["reused_from"]["source_audio_sha256"] == reflow_record[
+            "audio_sha256"
+        ]
+        tampered_reflow_record = copy.deepcopy(reused_reflow_record)
+        tampered_reflow_record["reused_from"]["source_audio_sha256"] = "0" * 64
+        assert not reusable_segment_record(
+            tampered_reflow_record,
+            2,
+            reflow_segment,
+            reflow_target,
+            resume_output,
+            reflow_seed,
+        )
+        duplicate_source = resume_segments / "segment-0003.wav"
+        copy_or_link_atomically(resume_segment_path, duplicate_source)
+        duplicate_segment = SimpleNamespace(
+            line_number=3,
+            text=resume_segment.text,
+            warnings=(),
+        )
+        duplicate_record = segment_record(
+            3,
+            duplicate_segment,
+            duplicate_source,
+            resume_output,
+            segment_seed(20260713, 3),
+        )
+        assert not prepare_reflow_reuse_sources(
+            {1: loaded_records[1], 3: duplicate_record},
+            [reflow_segment],
+            resume_output,
+            resume_output / "segments" / ".reflow-ambiguous",
+        )
+        silent_reflow_segment = SimpleNamespace(
+            line_number=4,
+            text="Trecho silencioso.",
+            warnings=(),
+        )
+        silent_duration = 1
+        silent_record = {
+            "index": 4,
+            "semantic_id": "line-4",
+            "locutor_line": 4,
+            "character_count": len(silent_reflow_segment.text),
+            "text_sha256": hashlib.sha256(
+                silent_reflow_segment.text.encode("utf-8")
+            ).hexdigest(),
+            "warnings": [],
+            "path": silent_segment_path.relative_to(resume_output).as_posix(),
+            "audio_sha256": sha256_file(silent_segment_path),
+            "duration_seconds": silent_duration,
+            "speech": {},
+            "seed": segment_seed(20260713, 4),
+        }
+        assert not prepare_reflow_reuse_sources(
+            {4: silent_record},
+            [silent_reflow_segment],
+            resume_output,
+            resume_output / "segments" / ".reflow-silent",
+        )
+        escaped_record = dict(loaded_records[1])
+        escaped_record["path"] = "../segment-0001.wav"
+        assert not prepare_reflow_reuse_sources(
+            {1: escaped_record},
+            [reflow_segment],
+            resume_output,
+            resume_output / "segments" / ".reflow-escaped",
+        )
+        collision_source_a = resume_segments / "segment-0010.wav"
+        collision_source_b = resume_segments / "segment-0011.wav"
+        copy_or_link_atomically(reflow_target, collision_source_a)
+        copy_or_link_atomically(reflow_target, collision_source_b)
+        collision_segment_a = SimpleNamespace(
+            line_number=10,
+            text="Primeiro trecho preservado.",
+            warnings=(),
+        )
+        collision_segment_b = SimpleNamespace(
+            line_number=11,
+            text="Segundo trecho preservado.",
+            warnings=(),
+        )
+        collision_records = {
+            10: segment_record(
+                10,
+                collision_segment_a,
+                collision_source_a,
+                resume_output,
+                segment_seed(20260713, 10),
+            ),
+            11: segment_record(
+                11,
+                collision_segment_b,
+                collision_source_b,
+                resume_output,
+                segment_seed(20260713, 11),
+            ),
+        }
+        collision_targets = [
+            SimpleNamespace(
+                line_number=11,
+                text=collision_segment_a.text,
+                warnings=(),
+            ),
+            SimpleNamespace(
+                line_number=12,
+                text=collision_segment_b.text,
+                warnings=(),
+            ),
+        ]
+        collision_cache = resume_segments / ".reflow-collision"
+        collision_sources = prepare_reflow_reuse_sources(
+            collision_records,
+            collision_targets,
+            resume_output,
+            collision_cache,
+        )
+        assert len(collision_sources) == 2
+        replacement_a = collision_source_a.with_suffix(".replacement.wav")
+        replacement_b = collision_source_b.with_suffix(".replacement.wav")
+        write_wav(replacement_a, b"\x00\x20" * SAMPLE_RATE)
+        write_wav(replacement_b, b"\x00\x30" * SAMPLE_RATE)
+        os.replace(replacement_a, collision_source_a)
+        os.replace(replacement_b, collision_source_b)
+        for source_record, cached_path in collision_sources.values():
+            destination = resume_segments / f"segment-{source_record['index'] + 1:04d}.wav"
+            copy_or_link_atomically(cached_path, destination)
+            assert sha256_file(destination) == source_record["audio_sha256"]
+        shutil.rmtree(collision_cache)
+        shutil.rmtree(reflow_cache)
+        _, identity_free_records = load_render_journal(resume_journal_path, None)
+        assert identity_free_records == loaded_records
+        assert segment_seed(20260713, 2) == 20260714
+        assert segment_seed(None, 1) is None
+        resume_segment_path.write_bytes(b"not a WAV")
+        assert not reusable_segment_record(
+            loaded_records[1],
+            1,
+            resume_segment,
+            resume_segment_path,
+            resume_output,
+            resume_seed,
+        )
+        try:
+            load_render_journal(resume_journal_path, {"engine": "test", "device": "cuda"})
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("Expected a render journal identity mismatch to fail.")
+
         pdf_path = root / "source.pdf"
         writer = PdfWriter()
         writer.add_blank_page(width=360, height=540)
@@ -426,6 +1345,7 @@ def main() -> None:
 
         epub_export_map = json.loads(epub_map.read_text(encoding="utf-8"))
         epub_export_map["analysis"]["status"] = "approved"
+        epub_export_map["analysis"]["source_language"] = "en"
         for page in epub_export_map["pages"]:
             page["status"] = "mapped"
             page["blank"] = False
@@ -446,10 +1366,17 @@ def main() -> None:
         )
         epub_text_root = epub_root / "text"
         epub_page_records = []
+        epub_page_text = {
+            1: (
+                "I\nEPUB SOURCE\n\nPrimeiro verso\nSegundo verso\n\n- Fala direta.\n\n"
+                "Dr. José Meirelles2.\n2 Doutor José Meireles foi dirigente."
+            ),
+            2: "Texto de parágrafo.",
+        }
         for logical_page in (1, 2):
             epub_page = epub_text_root / "source" / "pages" / f"page-{logical_page:04d}.txt"
             epub_page.parent.mkdir(parents=True, exist_ok=True)
-            epub_page.write_text(f"Pagina EPUB {logical_page}.", encoding="utf-8")
+            epub_page.write_text(epub_page_text[logical_page], encoding="utf-8")
             epub_page_records.append(
                 {
                     "logical_page": logical_page,
@@ -463,7 +1390,7 @@ def main() -> None:
             )
         epub_chapter = epub_text_root / "source" / "chapters" / "chapter-01-epub-source.txt"
         epub_chapter.parent.mkdir(parents=True, exist_ok=True)
-        epub_chapter.write_text("EPUB SOURCE\n\nTexto da fonte EPUB.", encoding="utf-8")
+        epub_chapter.write_text("EPUB SOURCE\n\nSource text from the EPUB.", encoding="utf-8")
         epub_ledger_path = epub_root / "metadata" / "text-ledger.json"
         epub_ledger_path.write_text(
             json.dumps(
@@ -493,12 +1420,430 @@ def main() -> None:
             + "\n",
             encoding="utf-8",
         )
+        epub_layout_path = epub_root / "metadata" / "epub-layout.json"
+        write_json(
+            epub_layout_path,
+            {
+                "schema_version": "1.0",
+                "text_edition": "original",
+                "book_map_sha256": sha256_file(epub_map),
+                "text_ledger_sha256": sha256_file(epub_ledger_path),
+                "documents": [
+                    {
+                        "id": "chapter-001",
+                        "blocks": [
+                            {
+                                "kind": "heading",
+                                "level": 1,
+                                "spans": [
+                                    {
+                                        "source_file": "text/source/pages/page-0001.txt",
+                                        "source_sha256": epub_page_records[0]["source_sha256"],
+                                        "start_line": 1,
+                                        "end_line": 2,
+                                    }
+                                ],
+                            },
+                            {
+                                "kind": "verse",
+                                "spans": [
+                                    {
+                                        "source_file": "text/source/pages/page-0001.txt",
+                                        "source_sha256": epub_page_records[0]["source_sha256"],
+                                        "start_line": 4,
+                                        "end_line": 5,
+                                    }
+                                ],
+                            },
+                            {
+                                "kind": "dialogue",
+                                "spans": [
+                                    {
+                                        "source_file": "text/source/pages/page-0001.txt",
+                                        "source_sha256": epub_page_records[0]["source_sha256"],
+                                        "start_line": 7,
+                                        "end_line": 7,
+                                    }
+                                ],
+                            },
+                            {
+                                "kind": "paragraph",
+                                "spans": [
+                                    {
+                                        "source_file": "text/source/pages/page-0001.txt",
+                                        "source_sha256": epub_page_records[0]["source_sha256"],
+                                        "start_line": 9,
+                                        "end_line": 9,
+                                    }
+                                ],
+                            },
+                            {
+                                "kind": "note",
+                                "id": "note-2",
+                                "marker": "2",
+                                "spans": [
+                                    {
+                                        "source_file": "text/source/pages/page-0001.txt",
+                                        "source_sha256": epub_page_records[0]["source_sha256"],
+                                        "start_line": 10,
+                                        "end_line": 10,
+                                    }
+                                ],
+                            },
+                            {
+                                "kind": "paragraph",
+                                "spans": [
+                                    {
+                                        "source_file": "text/source/pages/page-0002.txt",
+                                        "source_sha256": epub_page_records[1]["source_sha256"],
+                                        "start_line": 1,
+                                        "end_line": 1,
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
         run(
             str(ROOT / "verify_text_ledger.py"),
             "--book-map",
             str(epub_map),
             "--ledger",
             str(epub_ledger_path),
+            "--text-root",
+            str(epub_text_root),
+        )
+        run(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(epub_root),
+        )
+        epub_layout_data = json.loads(epub_layout_path.read_text(encoding="utf-8"))
+        layout_order_root = root / "layout-order"
+        shutil.copytree(epub_root, layout_order_root)
+        layout_order_map_path = layout_order_root / "metadata" / "book-map.json"
+        layout_order_map = json.loads(layout_order_map_path.read_text(encoding="utf-8"))
+        layout_order_map["pages"][0]["chapter_id"] = "chapter-001"
+        layout_order_map["pages"][1]["chapter_id"] = "chapter-002"
+        layout_order_map["chapters"] = [
+            {
+                "id": "chapter-001",
+                "number": 1,
+                "title": "Primeiro Capítulo",
+                "start_logical_page": 1,
+                "end_logical_page": 1,
+            },
+            {
+                "id": "chapter-002",
+                "number": 2,
+                "title": "Segundo Capítulo",
+                "start_logical_page": 2,
+                "end_logical_page": 2,
+            },
+        ]
+        write_json(layout_order_map_path, layout_order_map)
+        layout_order_text_root = layout_order_root / "text"
+        layout_order_second_chapter = (
+            layout_order_text_root / "source" / "chapters" / "chapter-02-second-chapter.txt"
+        )
+        layout_order_second_chapter.write_text(
+            "Segundo Capítulo\n\nTexto de parágrafo.",
+            encoding="utf-8",
+        )
+        layout_order_ledger_path = layout_order_root / "metadata" / "text-ledger.json"
+        layout_order_ledger = json.loads(layout_order_ledger_path.read_text(encoding="utf-8"))
+        layout_order_ledger["book_map_sha256"] = sha256_file(layout_order_map_path)
+        layout_order_ledger["chapter_outputs"] = [
+            {
+                "id": "chapter-002",
+                "source_file": "source/chapters/chapter-02-second-chapter.txt",
+                "source_sha256": sha256_file(layout_order_second_chapter),
+                "source_pages": [
+                    {
+                        "logical_page": 2,
+                        "source_sha256": layout_order_ledger["pages"][1]["source_sha256"],
+                    }
+                ],
+                "verified_by": "codex",
+            },
+            {
+                "id": "chapter-001",
+                "source_file": "source/chapters/chapter-01-epub-source.txt",
+                "source_sha256": sha256_file(
+                    layout_order_text_root
+                    / "source"
+                    / "chapters"
+                    / "chapter-01-epub-source.txt"
+                ),
+                "source_pages": [
+                    {
+                        "logical_page": 1,
+                        "source_sha256": layout_order_ledger["pages"][0]["source_sha256"],
+                    }
+                ],
+                "verified_by": "codex",
+            },
+        ]
+        write_json(layout_order_ledger_path, layout_order_ledger)
+        layout_order_layout = copy.deepcopy(epub_layout_data)
+        layout_order_layout["book_map_sha256"] = sha256_file(layout_order_map_path)
+        layout_order_layout["text_ledger_sha256"] = sha256_file(layout_order_ledger_path)
+        layout_order_layout["documents"] = [
+            {
+                "id": "chapter-002",
+                "blocks": copy.deepcopy(epub_layout_data["documents"][0]["blocks"][:3]),
+            },
+            {
+                "id": "chapter-001",
+                "blocks": copy.deepcopy(epub_layout_data["documents"][0]["blocks"][3:]),
+            },
+        ]
+        layout_order_layout_path = layout_order_root / "metadata" / "epub-layout.json"
+        write_json(layout_order_layout_path, layout_order_layout)
+        run_fails(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(layout_order_root),
+        )
+        canonical_layout_order = copy.deepcopy(layout_order_layout)
+        canonical_layout_order["documents"] = [
+            {
+                "id": "chapter-001",
+                "blocks": copy.deepcopy(epub_layout_data["documents"][0]["blocks"][:3]),
+            },
+            {
+                "id": "chapter-002",
+                "blocks": copy.deepcopy(epub_layout_data["documents"][0]["blocks"][3:]),
+            },
+        ]
+        write_json(layout_order_layout_path, canonical_layout_order)
+        run(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(layout_order_root),
+        )
+        layout_order_manifest_path = (
+            layout_order_root / "metadata" / "epub-manifest-order.json"
+        )
+        run(
+            str(ROOT / "build_epub_manifest.py"),
+            "--book-map",
+            str(layout_order_map_path),
+            "--ledger",
+            str(layout_order_ledger_path),
+            "--assets-manifest",
+            str(layout_order_root / "metadata" / "assets-manifest.json"),
+            "--text-root",
+            str(layout_order_text_root),
+            "--output",
+            str(layout_order_manifest_path),
+        )
+        layout_order_export = layout_order_root / "exports" / "epub" / "canonical-order.epub"
+        run(
+            str(ROOT / "export_epub.py"),
+            "--book-root",
+            str(layout_order_root),
+            "--epub-manifest",
+            str(layout_order_manifest_path),
+            "--output",
+            str(layout_order_export),
+        )
+        reordered_layout_order = copy.deepcopy(canonical_layout_order)
+        reordered_layout_order["documents"][0]["id"] = "chapter-002"
+        reordered_layout_order["documents"][1]["id"] = "chapter-001"
+        write_json(layout_order_layout_path, reordered_layout_order)
+        reordered_manifest_order = json.loads(
+            layout_order_manifest_path.read_text(encoding="utf-8")
+        )
+        source_cover_documents = [
+            document
+            for document in reordered_manifest_order["documents"]
+            if document.get("kind") == "source_cover"
+        ]
+        content_documents = [
+            document
+            for document in reordered_manifest_order["documents"]
+            if document.get("kind") != "source_cover"
+        ]
+        reordered_manifest_order["documents"] = [
+            *source_cover_documents,
+            *reversed(content_documents),
+        ]
+        reordered_manifest_order["layout"]["sha256"] = sha256_file(
+            layout_order_layout_path
+        )
+        reordered_manifest_order_path = (
+            layout_order_root / "metadata" / "epub-manifest-reordered.json"
+        )
+        write_json(reordered_manifest_order_path, reordered_manifest_order)
+        run_fails(
+            str(ROOT / "export_epub.py"),
+            "--book-root",
+            str(layout_order_root),
+            "--epub-manifest",
+            str(reordered_manifest_order_path),
+            "--output",
+            str(layout_order_root / "exports" / "epub" / "reordered-order.epub"),
+        )
+        run_fails(
+            str(ROOT / "validate_epub_export.py"),
+            "--book-root",
+            str(layout_order_root),
+            "--epub-manifest",
+            str(reordered_manifest_order_path),
+            "--epub",
+            str(layout_order_export),
+        )
+        ordered_documents_layout = copy.deepcopy(epub_layout_data)
+        ordered_documents_layout["documents"] = [
+            {
+                "id": "chapter-001",
+                "blocks": copy.deepcopy(epub_layout_data["documents"][0]["blocks"][:3]),
+            },
+            {
+                "id": "chapter-002",
+                "blocks": copy.deepcopy(epub_layout_data["documents"][0]["blocks"][3:]),
+            },
+        ]
+        epub_ledger_data = json.loads(epub_ledger_path.read_text(encoding="utf-8"))
+        assert not validate_layout(
+            ordered_documents_layout,
+            epub_root,
+            sha256_file(epub_map),
+            sha256_file(epub_ledger_path),
+            epub_ledger_data,
+            ["chapter-001", "chapter-002"],
+        )
+        duplicate_note_marker_layout = copy.deepcopy(ordered_documents_layout)
+        duplicate_note_marker_layout["documents"][0]["blocks"][1]["kind"] = "note"
+        duplicate_note_marker_layout["documents"][0]["blocks"][1]["id"] = "note-other"
+        duplicate_note_marker_layout["documents"][0]["blocks"][1]["marker"] = "2"
+        duplicate_note_marker_errors = validate_layout(
+            duplicate_note_marker_layout,
+            epub_root,
+            sha256_file(epub_map),
+            sha256_file(epub_ledger_path),
+            epub_ledger_data,
+            ["chapter-001", "chapter-002"],
+        )
+        assert any("marker is duplicated: 2" in error for error in duplicate_note_marker_errors)
+        duplicate_note_id_layout = copy.deepcopy(ordered_documents_layout)
+        duplicate_note_id_layout["documents"][0]["blocks"][1]["kind"] = "note"
+        duplicate_note_id_layout["documents"][0]["blocks"][1]["id"] = "note-2"
+        duplicate_note_id_layout["documents"][0]["blocks"][1]["marker"] = "3"
+        duplicate_note_id_errors = validate_layout(
+            duplicate_note_id_layout,
+            epub_root,
+            sha256_file(epub_map),
+            sha256_file(epub_ledger_path),
+            epub_ledger_data,
+            ["chapter-001", "chapter-002"],
+        )
+        assert any("id is duplicated: note-2" in error for error in duplicate_note_id_errors)
+        swapped_document_layout = copy.deepcopy(ordered_documents_layout)
+        swapped_document_layout["documents"][0]["id"] = "chapter-002"
+        swapped_document_layout["documents"][1]["id"] = "chapter-001"
+        swapped_document_errors = validate_layout(
+            swapped_document_layout,
+            epub_root,
+            sha256_file(epub_map),
+            sha256_file(epub_ledger_path),
+            epub_ledger_data,
+            ["chapter-001", "chapter-002"],
+        )
+        assert any("document order" in error for error in swapped_document_errors)
+        invalid_layout_hash = copy.deepcopy(epub_layout_data)
+        invalid_layout_hash["documents"][0]["blocks"][0]["spans"][0]["source_sha256"] = "0" * 64
+        invalid_layout_hash_path = epub_root / "metadata" / "epub-layout-invalid-hash.json"
+        write_json(invalid_layout_hash_path, invalid_layout_hash)
+        run_fails(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(epub_root),
+            "--layout",
+            str(invalid_layout_hash_path),
+        )
+        incomplete_layout = copy.deepcopy(epub_layout_data)
+        incomplete_layout["documents"][0]["blocks"].pop()
+        incomplete_layout_path = epub_root / "metadata" / "epub-layout-incomplete.json"
+        write_json(incomplete_layout_path, incomplete_layout)
+        run_fails(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(epub_root),
+            "--layout",
+            str(incomplete_layout_path),
+        )
+        overlapping_layout = copy.deepcopy(epub_layout_data)
+        overlapping_layout["documents"][0]["blocks"].append(
+            {
+                "kind": "paragraph",
+                "spans": [
+                    {
+                        "source_file": "text/source/pages/page-0001.txt",
+                        "source_sha256": epub_page_records[0]["source_sha256"],
+                        "start_line": 4,
+                        "end_line": 4,
+                    }
+                ],
+            }
+        )
+        overlapping_layout_path = epub_root / "metadata" / "epub-layout-overlapping.json"
+        write_json(overlapping_layout_path, overlapping_layout)
+        run_fails(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(epub_root),
+            "--layout",
+            str(overlapping_layout_path),
+        )
+        unknown_layout = copy.deepcopy(epub_layout_data)
+        unknown_layout["documents"][0]["blocks"][0]["kind"] = "unknown"
+        unknown_layout_path = epub_root / "metadata" / "epub-layout-unknown.json"
+        write_json(unknown_layout_path, unknown_layout)
+        run_fails(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(epub_root),
+            "--layout",
+            str(unknown_layout_path),
+        )
+        epub_translation_ledger_path = epub_root / "metadata" / "translation-ledger.json"
+        epub_translation_ledger = translation_ledger_for(
+            epub_map,
+            epub_ledger_path,
+            json.loads(epub_ledger_path.read_text(encoding="utf-8")),
+            epub_text_root,
+            "en",
+            "Fonte EPUB em Portugues",
+            {"chapter-001": "Fonte EPUB"},
+        )
+        write_json(epub_translation_ledger_path, epub_translation_ledger)
+        run(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--translation-ledger",
+            str(epub_translation_ledger_path),
+            "--text-root",
+            str(epub_text_root),
+        )
+        invalid_language_evidence = copy.deepcopy(epub_translation_ledger)
+        invalid_language_evidence["translation_decision"]["evidence"][0]["source_sha256"] = "0" * 64
+        invalid_language_evidence_path = epub_root / "metadata" / "translation-ledger-invalid-evidence.json"
+        write_json(invalid_language_evidence_path, invalid_language_evidence)
+        run_fails(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--translation-ledger",
+            str(invalid_language_evidence_path),
             "--text-root",
             str(epub_text_root),
         )
@@ -517,6 +1862,8 @@ def main() -> None:
             str(epub_export_manifest),
         )
         epub_export_data = json.loads(epub_export_manifest.read_text(encoding="utf-8"))
+        assert epub_export_data["layout"]["mode"] == "semantic"
+        assert epub_export_data["layout"]["sha256"] == sha256_file(epub_layout_path)
         source_cover_document = epub_export_data["documents"][0]
         assert source_cover_document["kind"] == "source_cover"
         assert source_cover_document["source_file"] is None
@@ -543,10 +1890,234 @@ def main() -> None:
             "--epub",
             str(epub_source_cover_export),
         )
+        source_cover_after_chapter = copy.deepcopy(epub_export_data)
+        source_cover_after_chapter["documents"] = [
+            *source_cover_after_chapter["documents"][1:],
+            source_cover_after_chapter["documents"][0],
+        ]
+        source_cover_after_chapter_path = (
+            epub_root / "metadata" / "epub-manifest-source-cover-after-chapter.json"
+        )
+        write_json(source_cover_after_chapter_path, source_cover_after_chapter)
+        run_fails(
+            str(ROOT / "export_epub.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(source_cover_after_chapter_path),
+            "--output",
+            str(epub_root / "exports" / "epub" / "invalid-source-cover-order.epub"),
+        )
+        run_fails(
+            str(ROOT / "validate_epub_export.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(source_cover_after_chapter_path),
+            "--epub",
+            str(epub_source_cover_export),
+        )
+        duplicate_source_cover = copy.deepcopy(epub_export_data)
+        duplicate_source_cover_document = copy.deepcopy(
+            duplicate_source_cover["documents"][0]
+        )
+        duplicate_source_cover_document["id"] = "source-cover-duplicate"
+        duplicate_source_cover["documents"].insert(1, duplicate_source_cover_document)
+        duplicate_source_cover_path = (
+            epub_root / "metadata" / "epub-manifest-duplicate-source-cover.json"
+        )
+        write_json(duplicate_source_cover_path, duplicate_source_cover)
+        run_fails(
+            str(ROOT / "export_epub.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(duplicate_source_cover_path),
+            "--output",
+            str(epub_root / "exports" / "epub" / "invalid-duplicate-source-cover.epub"),
+        )
+        run_fails(
+            str(ROOT / "validate_epub_export.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(duplicate_source_cover_path),
+            "--epub",
+            str(epub_source_cover_export),
+        )
+        reordered_spine_export = epub_root / "exports" / "epub" / "reordered-spine.epub"
+        spine_reordered = False
+        with zipfile.ZipFile(epub_source_cover_export) as source_archive, zipfile.ZipFile(
+            reordered_spine_export,
+            "w",
+        ) as reordered_archive:
+            for info in source_archive.infolist():
+                payload = source_archive.read(info.filename)
+                if info.filename == "OEBPS/content.opf":
+                    original_spine = (
+                        b'<itemref idref="doc-1"/>\n    <itemref idref="doc-2"/>'
+                    )
+                    reordered_spine = (
+                        b'<itemref idref="doc-2"/>\n    <itemref idref="doc-1"/>'
+                    )
+                    assert original_spine in payload
+                    payload = payload.replace(original_spine, reordered_spine, 1)
+                    spine_reordered = True
+                reordered_archive.writestr(info, payload)
+        assert spine_reordered
+        reordered_spine_sidecar = json.loads(
+            epub_source_cover_export.with_suffix(".epub.json").read_text(encoding="utf-8")
+        )
+        reordered_spine_sidecar["epub_path"] = reordered_spine_export.relative_to(
+            epub_root
+        ).as_posix()
+        reordered_spine_sidecar["epub_sha256"] = sha256_file(reordered_spine_export)
+        write_json(reordered_spine_export.with_suffix(".epub.json"), reordered_spine_sidecar)
+        run_fails(
+            str(ROOT / "validate_epub_export.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(epub_export_manifest),
+            "--epub",
+            str(reordered_spine_export),
+        )
         with zipfile.ZipFile(epub_source_cover_export) as archive:
             source_cover_xhtml = archive.read("OEBPS/text/001-source-cover.xhtml").decode("utf-8")
             assert 'epub:type="titlepage"' in source_cover_xhtml
             assert "z-cover" in source_cover_xhtml
+            original_chapter_xhtml = archive.read("OEBPS/text/002-chapter-001.xhtml").decode("utf-8")
+            assert '<h1 class="source-heading">' in original_chapter_xhtml
+            assert "Primeiro verso" in original_chapter_xhtml
+            assert 'class="verse"' in original_chapter_xhtml
+            assert 'class="dialogue">- Fala direta.</p>' in original_chapter_xhtml
+            assert 'epub:type="noteref" href="#note-2">2</a>' in original_chapter_xhtml
+            assert 'id="note-2" epub:type="footnote" class="footnote"' in original_chapter_xhtml
+            assert "Texto de parágrafo." in original_chapter_xhtml
+            assert "Source text from the EPUB." not in original_chapter_xhtml
+            assert "Texto traduzido para PT-BR." not in original_chapter_xhtml
+        tampered_source_export = epub_root / "exports" / "epub" / "tampered-source.epub"
+        with zipfile.ZipFile(epub_source_cover_export) as source_archive, zipfile.ZipFile(
+            tampered_source_export,
+            "w",
+        ) as tampered_archive:
+            for info in source_archive.infolist():
+                payload = source_archive.read(info.filename)
+                if info.filename == "OEBPS/text/002-chapter-001.xhtml":
+                    payload = payload.replace(b"Primeiro verso", b"Texto adulterado")
+                tampered_archive.writestr(info, payload)
+        tampered_sidecar = json.loads(
+            epub_source_cover_export.with_suffix(".epub.json").read_text(encoding="utf-8")
+        )
+        tampered_sidecar["epub_path"] = tampered_source_export.relative_to(epub_root).as_posix()
+        tampered_sidecar["epub_sha256"] = sha256_file(tampered_source_export)
+        write_json(tampered_source_export.with_suffix(".epub.json"), tampered_sidecar)
+        with zipfile.ZipFile(tampered_source_export) as archive:
+            assert b"Texto adulterado" in archive.read("OEBPS/text/002-chapter-001.xhtml")
+        assert validate_epub_document_texts(
+            tampered_source_export,
+            epub_root,
+            [
+                {
+                    **document,
+                    "_text_path": (
+                        epub_text_root / document["source_file"].removeprefix("text/")
+                        if document.get("source_file")
+                        else None
+                    ),
+                }
+                for document in epub_export_data["documents"]
+            ],
+        )
+        run_fails(
+            str(ROOT / "validate_epub_export.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(epub_export_manifest),
+            "--epub",
+            str(tampered_source_export),
+        )
+        epub_translated_manifest = epub_root / "metadata" / "epub-manifest.pt-br.json"
+        run(
+            str(ROOT / "build_epub_manifest.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--assets-manifest",
+            str(epub_assets_path),
+            "--text-root",
+            str(epub_text_root),
+            "--text-edition",
+            "translated-pt-br",
+            "--output",
+            str(epub_translated_manifest),
+        )
+        epub_translated_data = json.loads(epub_translated_manifest.read_text(encoding="utf-8"))
+        assert epub_translated_data["text_edition"] == "translated-pt-br"
+        assert epub_translated_data["language"] == "pt-BR"
+        assert epub_translated_data["source_language"] == "en"
+        assert epub_translated_data["translation_ledger_sha256"] == sha256_file(epub_translation_ledger_path)
+        assert epub_translated_data["documents"][1]["translation_file"].startswith(
+            "text/translation/pt-BR/"
+        )
+        assert all(
+            document.get("kind") == "source_cover"
+            or (
+                str(document.get("source_file")).startswith("text/source/")
+                and str(document.get("translation_file")).startswith("text/translation/pt-BR/")
+            )
+            for document in epub_translated_data["documents"]
+        )
+        epub_translated_export = epub_root / "exports" / "epub" / "translated.epub"
+        run(
+            str(ROOT / "export_epub.py"),
+            "--book-root",
+            str(epub_root),
+            "--text-edition",
+            "translated-pt-br",
+            "--output",
+            str(epub_translated_export),
+        )
+        run(
+            str(ROOT / "validate_epub_export.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub",
+            str(epub_translated_export),
+            "--text-edition",
+            "translated-pt-br",
+        )
+        translated_sidecar = json.loads(
+            epub_translated_export.with_suffix(".epub.json").read_text(encoding="utf-8")
+        )
+        assert translated_sidecar["text_edition"] == "translated-pt-br"
+        assert translated_sidecar["language"] == "pt-BR"
+        assert translated_sidecar["source_language"] == "en"
+        assert translated_sidecar["translation_ledger_sha256"] == sha256_file(epub_translation_ledger_path)
+        with zipfile.ZipFile(epub_translated_export) as archive:
+            translated_chapter_xhtml = archive.read("OEBPS/text/002-chapter-001.xhtml").decode("utf-8")
+            assert "Texto traduzido para PT-BR." in translated_chapter_xhtml
+            assert "Source text from the EPUB." not in translated_chapter_xhtml
+        original_rejects_translated_source = copy.deepcopy(epub_export_data)
+        original_rejects_translated_source["documents"][1]["source_file"] = (
+            epub_translated_data["documents"][1]["translation_file"]
+        )
+        original_rejects_translated_source["documents"][1]["source_sha256"] = (
+            epub_translated_data["documents"][1]["translation_sha256"]
+        )
+        original_rejects_translated_source_path = epub_root / "metadata" / "epub-manifest-original-translated-path.json"
+        write_json(original_rejects_translated_source_path, original_rejects_translated_source)
+        run_fails(
+            str(ROOT / "export_epub.py"),
+            "--book-root",
+            str(epub_root),
+            "--epub-manifest",
+            str(original_rejects_translated_source_path),
+            "--output",
+            str(epub_root / "exports" / "epub" / "invalid-original-translated-path.epub"),
+        )
 
         image_pdf = root / "image-source.pdf"
         image_jpeg = root / "image-source.jpg"
@@ -775,6 +2346,7 @@ def main() -> None:
 
         export_map = json.loads(image_map_path.read_text(encoding="utf-8"))
         export_map["analysis"]["status"] = "approved"
+        export_map["analysis"]["source_language"] = "pt-BR"
         export_map["pages"][0]["status"] = "mapped"
         export_map["pages"][0]["blank"] = False
         export_map["pages"][0]["chapter_id"] = "chapter-001"
@@ -801,11 +2373,15 @@ def main() -> None:
         image_text_root = image_book_root / "text"
         image_page_file = image_text_root / "source" / "pages" / "page-0001.txt"
         image_page_file.parent.mkdir(parents=True)
-        image_page_file.write_text("LIVRO COM IMAGEM\n\nTexto fiel de EPUB.", encoding="utf-8")
+        image_page_file.write_text(
+            "LIVRO COM IMAGEM\n\nTexto fiel de EPUB. He said hello. Vossa mercê chegou.",
+            encoding="utf-8",
+        )
         image_chapter = image_text_root / "source" / "chapters" / "chapter-01-livro-com-imagem.txt"
         image_chapter.parent.mkdir(parents=True)
         image_chapter.write_text(
-            "LIVRO COM IMAGEM\n\nPrimeiro verso\nSegundo verso\nTerceiro verso\n\nTexto fiel de EPUB.",
+            "LIVRO COM IMAGEM\n\nPrimeiro verso\nSegundo verso\nTerceiro verso\n\n"
+            "Texto fiel de EPUB. He said hello. Vossa mercê chegou.",
             encoding="utf-8",
         )
         image_ledger_path = image_book_root / "metadata" / "text-ledger.json"
@@ -851,6 +2427,440 @@ def main() -> None:
             "--text-root",
             str(image_text_root),
         )
+        image_translation_ledger_path = image_book_root / "metadata" / "translation-ledger.json"
+        image_translation_ledger = translation_ledger_for(
+            image_map_path,
+            image_ledger_path,
+            image_ledger,
+            image_text_root,
+            "pt-BR",
+            "Livro com Acao",
+            {"chapter-001": "Livro com Imagem"},
+        )
+        write_json(image_translation_ledger_path, image_translation_ledger)
+        run_fails(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(image_map_path),
+            "--ledger",
+            str(image_ledger_path),
+            "--translation-ledger",
+            str(image_translation_ledger_path),
+            "--text-root",
+            str(image_text_root),
+        )
+        run_fails(
+            str(ROOT / "build_epub_manifest.py"),
+            "--book-map",
+            str(image_map_path),
+            "--ledger",
+            str(image_ledger_path),
+            "--assets-manifest",
+            str(image_assets_path),
+            "--text-root",
+            str(image_text_root),
+            "--text-edition",
+            "translated-pt-br",
+            "--output",
+            str(image_book_root / "metadata" / "invalid-pt-br-epub-manifest.json"),
+        )
+        archaic_locutor = image_text_root / "locutor" / "chapters" / "chapter-01-livro-com-imagem.txt"
+        archaic_locutor.parent.mkdir(parents=True, exist_ok=True)
+        archaic_locutor.write_text(
+            "LIVRO COM IMAGEM\n\nPrimeiro verso\nSegundo verso\nTerceiro verso\n\n"
+            "Texto fiel de EPUB. He said hello. Você chegou.",
+            encoding="utf-8",
+        )
+        narrator_changes_path = image_book_root / "metadata" / "narrator-changes.json"
+        narrator_changes = {
+            "schema_version": "2.0",
+            "source_book_sha256": sha256_file(image_book_root / "source" / "original.pdf"),
+            "book_map_sha256": sha256_file(image_map_path),
+            "mode": "archaic-modernized",
+            "base_edition": "source",
+            "base_ledger_sha256": sha256_file(image_ledger_path),
+            "archaic_assessment": {
+                "status": "confirmed",
+                "reviewed_by": "codex",
+                "evidence": [
+                    {
+                        "logical_page": 1,
+                        "source_sha256": image_ledger["pages"][0]["source_sha256"],
+                        "source_span": "Vossa mercê chegou.",
+                        "reason": "Exact archaic source span was reviewed before narrator modernization.",
+                    }
+                ],
+            },
+            "outputs": [
+                {
+                    "id": "chapter-001-locutor",
+                    "kind": "full-book",
+                    "locutor_file": "locutor/chapters/chapter-01-livro-com-imagem.txt",
+                    "locutor_sha256": sha256_file(archaic_locutor),
+                    "reviewed_by": "codex",
+                    "base_outputs": [
+                        {
+                            "id": "chapter-001",
+                            "base_file": image_ledger["chapter_outputs"][0]["source_file"],
+                            "base_sha256": image_ledger["chapter_outputs"][0]["source_sha256"],
+                        }
+                    ],
+                }
+            ],
+            "changes": [
+                {
+                    "output_id": "chapter-001-locutor",
+                    "base_output_id": "chapter-001",
+                    "kind": "archaic_lexical_modernization",
+                    "base_span": "Vossa mercê chegou.",
+                    "locutor_span": "Você chegou.",
+                    "logical_pages": [1],
+                    "source_sha256": image_ledger["pages"][0]["source_sha256"],
+                    "reason": "Modernized a confirmed archaic form after exact evidence review.",
+                    "reviewed_by": "codex",
+                }
+            ],
+        }
+        write_json(narrator_changes_path, narrator_changes)
+        run(
+            str(ROOT / "validate_narrator_lineage.py"),
+            "--book-root",
+            str(image_book_root),
+            "--input-file",
+            str(archaic_locutor),
+        )
+        missing_archaic_evidence = copy.deepcopy(narrator_changes)
+        missing_archaic_evidence["archaic_assessment"].pop("evidence")
+        missing_archaic_evidence_path = image_book_root / "metadata" / "narrator-changes-missing-evidence.json"
+        write_json(missing_archaic_evidence_path, missing_archaic_evidence)
+        run_fails(
+            str(ROOT / "validate_narrator_lineage.py"),
+            "--book-root",
+            str(image_book_root),
+            "--narrator-changes",
+            str(missing_archaic_evidence_path),
+            "--input-file",
+            str(archaic_locutor),
+        )
+        mismatched_archaic_evidence = copy.deepcopy(narrator_changes)
+        mismatched_archaic_evidence["archaic_assessment"]["evidence"][0][
+            "source_span"
+        ] = "Texto fiel de EPUB."
+        mismatched_archaic_evidence_path = (
+            image_book_root / "metadata" / "narrator-changes-mismatched-evidence.json"
+        )
+        write_json(mismatched_archaic_evidence_path, mismatched_archaic_evidence)
+        run_fails(
+            str(ROOT / "validate_narrator_lineage.py"),
+            "--book-root",
+            str(image_book_root),
+            "--narrator-changes",
+            str(mismatched_archaic_evidence_path),
+            "--input-file",
+            str(archaic_locutor),
+        )
+        wrong_locutor_hash = copy.deepcopy(narrator_changes)
+        wrong_locutor_hash["outputs"][0]["locutor_sha256"] = "0" * 64
+        wrong_locutor_hash_path = image_book_root / "metadata" / "narrator-changes-wrong-hash.json"
+        write_json(wrong_locutor_hash_path, wrong_locutor_hash)
+        run_fails(
+            str(ROOT / "validate_narrator_lineage.py"),
+            "--book-root",
+            str(image_book_root),
+            "--narrator-changes",
+            str(wrong_locutor_hash_path),
+            "--input-file",
+            str(archaic_locutor),
+        )
+        unrelated_locutor = image_text_root / "locutor" / "chapters" / "unrelated.txt"
+        unrelated_locutor.write_text("Conteúdo sem relação com a fonte.", encoding="utf-8")
+        unrelated_narrator_changes = copy.deepcopy(narrator_changes)
+        unrelated_narrator_changes["outputs"][0]["locutor_file"] = "locutor/chapters/unrelated.txt"
+        unrelated_narrator_changes["outputs"][0]["locutor_sha256"] = sha256_file(unrelated_locutor)
+        unrelated_narrator_changes_path = image_book_root / "metadata" / "narrator-changes-unrelated.json"
+        write_json(unrelated_narrator_changes_path, unrelated_narrator_changes)
+        run_fails(
+            str(ROOT / "validate_narrator_lineage.py"),
+            "--book-root",
+            str(image_book_root),
+            "--narrator-changes",
+            str(unrelated_narrator_changes_path),
+            "--input-file",
+            str(unrelated_locutor),
+        )
+        audio_root = image_book_root / "audio"
+        narrator_review_path = image_book_root / "metadata" / "narrator-review.json"
+        active_quality_findings = audit_text(archaic_locutor.read_text(encoding="utf-8"))
+        narrator_review_draft = draft_review(
+            image_book_root,
+            archaic_locutor,
+            active_quality_findings,
+        )
+        assert narrator_review_draft["output_file"] == archaic_locutor.relative_to(
+            image_text_root
+        ).as_posix()
+        assert narrator_review_draft["status"] == "needs-review"
+        assert all(
+            finding["category"] == ""
+            and finding["suggested_category"] in {
+                "heading",
+                "prose",
+                "dialogue",
+                "quotation",
+                "verse",
+                "note",
+                "list",
+                "excluded",
+            }
+            for finding in narrator_review_draft["findings"]
+        )
+        assert narrator_review_draft["review_scope"]["logical_pages"] == [1]
+        assert {
+            finding.locutor_span
+            for finding in active_quality_findings
+            if finding.kind == "uppercase_token"
+        } == {"LIVRO", "COM", "IMAGEM", "EPUB"}
+        pronunciation_entries = [
+            {
+                "term": "EPUB",
+                "kind": "acronym",
+                "decision": "preserved",
+                "locutor_span": "EPUB",
+                "logical_pages": [1],
+                "reason": "The acronym remains in the reviewed narrator text.",
+                "reviewed_by": "codex",
+            }
+        ]
+        narrator_review = {
+            "schema_version": "1.0",
+            "profile": QUALITY_PROFILE,
+            "status": "approved",
+            "reviewed_by": "codex",
+            "output_file": archaic_locutor.relative_to(image_text_root).as_posix(),
+            "output_sha256": sha256_file(archaic_locutor),
+            "narrator_changes_sha256": sha256_file(narrator_changes_path),
+            "review_scope": {
+                "categories": [
+                    "heading",
+                    "prose",
+                    "dialogue",
+                    "quotation",
+                    "verse",
+                    "note",
+                    "list",
+                ],
+                "logical_pages": [1],
+            },
+            "findings": [
+                {
+                    "id": finding.id,
+                    "kind": finding.kind,
+                    "severity": finding.severity,
+                    "line_number": finding.line_number,
+                    "column": finding.column,
+                    "locutor_span": finding.locutor_span,
+                    "context": finding.context,
+                    "category": "heading" if finding.line_number == 1 else "prose",
+                    "status": "preserved",
+                    "logical_pages": [1],
+                    "reason": "The visible uppercase source form was reviewed for speech.",
+                    "reviewed_by": "codex",
+                }
+                for finding in active_quality_findings
+            ],
+            "pronunciation_review": {
+                "status": "approved",
+                "reviewed_by": "codex",
+                "entries": pronunciation_entries,
+            },
+        }
+        write_json(narrator_review_path, narrator_review)
+        quality_errors, quality_provenance = validate_review(
+            image_book_root,
+            narrator_review_path,
+            archaic_locutor,
+        )
+        assert not quality_errors, quality_errors
+        assert quality_provenance is not None
+        assert quality_provenance["profile"] == QUALITY_PROFILE
+        missing_epub_decision = copy.deepcopy(narrator_review)
+        missing_epub_decision["pronunciation_review"]["entries"] = []
+        write_json(narrator_review_path, missing_epub_decision)
+        missing_epub_errors, _ = validate_review(
+            image_book_root,
+            narrator_review_path,
+            archaic_locutor,
+        )
+        assert any("acronym pronunciation decision" in error for error in missing_epub_errors)
+        write_json(narrator_review_path, narrator_review)
+        prose_all_caps_locutor = (
+            image_text_root / "locutor" / "chapters" / "prose-all-caps.txt"
+        )
+        prose_all_caps_locutor.write_text(
+            "O PDF E O EPUB ESTÃO PRONTOS.",
+            encoding="utf-8",
+        )
+        prose_narrator_changes = copy.deepcopy(narrator_changes)
+        prose_narrator_changes["outputs"].append(
+            {
+                "id": "prose-all-caps",
+                "kind": "chapter",
+                "locutor_file": "locutor/chapters/prose-all-caps.txt",
+                "locutor_sha256": sha256_file(prose_all_caps_locutor),
+                "reviewed_by": "codex",
+                "base_outputs": copy.deepcopy(
+                    narrator_changes["outputs"][0]["base_outputs"]
+                ),
+            }
+        )
+        prose_narrator_changes_path = (
+            image_book_root / "metadata" / "narrator-changes-prose-all-caps.json"
+        )
+        write_json(prose_narrator_changes_path, prose_narrator_changes)
+        prose_all_caps_findings = audit_text(
+            prose_all_caps_locutor.read_text(encoding="utf-8")
+        )
+        prose_all_caps_review = draft_review(
+            image_book_root,
+            prose_all_caps_locutor,
+            prose_all_caps_findings,
+            prose_narrator_changes_path,
+        )
+        assert all(
+            finding["category"] == ""
+            and finding["suggested_category"] == "prose"
+            for finding in prose_all_caps_review["findings"]
+        )
+        prose_all_caps_review["status"] = "approved"
+        prose_all_caps_review["reviewed_by"] = "codex"
+        for finding in prose_all_caps_review["findings"]:
+            finding["category"] = "prose"
+            finding["status"] = "preserved"
+            finding["reason"] = "The all-caps prose was reviewed for speech."
+            finding["reviewed_by"] = "codex"
+        prose_all_caps_review["pronunciation_review"]["status"] = "approved"
+        prose_all_caps_review["pronunciation_review"]["reviewed_by"] = "codex"
+        prose_all_caps_review["pronunciation_review"]["entries"] = []
+        prose_all_caps_review_path = (
+            image_book_root / "metadata" / "narrator-review-prose-all-caps.json"
+        )
+        write_json(prose_all_caps_review_path, prose_all_caps_review)
+        prose_all_caps_errors, _ = validate_review(
+            image_book_root,
+            prose_all_caps_review_path,
+            prose_all_caps_locutor,
+            prose_narrator_changes_path,
+        )
+        for finding in prose_all_caps_findings:
+            if finding.locutor_span in {"PDF", "EPUB"}:
+                assert any(finding.id in error for error in prose_all_caps_errors)
+        wrong_scope_review = copy.deepcopy(narrator_review)
+        wrong_scope_review["review_scope"]["logical_pages"] = [1, 2]
+        write_json(narrator_review_path, wrong_scope_review)
+        wrong_scope_errors, _ = validate_review(
+            image_book_root,
+            narrator_review_path,
+            archaic_locutor,
+        )
+        assert any("exactly cover the selected narrator output" in error for error in wrong_scope_errors)
+        write_json(narrator_review_path, narrator_review)
+        pending_narrator_review = copy.deepcopy(narrator_review)
+        pending_narrator_review["status"] = "needs-review"
+        write_json(narrator_review_path, pending_narrator_review)
+        run_fails(
+            str(ROOT / "validate_narrator_quality.py"),
+            "--book-root",
+            str(image_book_root),
+            "--input-file",
+            str(archaic_locutor),
+        )
+        custom_narrator_changes_path = (
+            image_book_root / "metadata" / "narrator-changes-custom.json"
+        )
+        custom_narrator_changes = copy.deepcopy(narrator_changes)
+        custom_narrator_changes["quality_review_test"] = "custom-narrator-changes"
+        write_json(custom_narrator_changes_path, custom_narrator_changes)
+        custom_draft_path = image_book_root / "metadata" / "narrator-review-custom.draft.json"
+        run(
+            str(ROOT / "narrator_quality.py"),
+            "--book-root",
+            str(image_book_root),
+            "--input-file",
+            str(archaic_locutor),
+            "--output",
+            str(custom_draft_path),
+            "--narrator-changes",
+            str(custom_narrator_changes_path),
+        )
+        custom_draft = json.loads(custom_draft_path.read_text(encoding="utf-8"))
+        assert custom_draft["narrator_changes_sha256"] == sha256_file(
+            custom_narrator_changes_path
+        )
+        assert custom_draft["review_scope"]["logical_pages"] == [1]
+        custom_narrator_review = copy.deepcopy(narrator_review)
+        custom_narrator_review["narrator_changes_sha256"] = sha256_file(
+            custom_narrator_changes_path
+        )
+        write_json(narrator_review_path, custom_narrator_review)
+        custom_quality_errors, _ = validate_review(
+            image_book_root,
+            narrator_review_path,
+            archaic_locutor,
+            custom_narrator_changes_path,
+        )
+        assert not custom_quality_errors
+        default_quality_errors, _ = validate_review(
+            image_book_root,
+            narrator_review_path,
+            archaic_locutor,
+        )
+        assert any(
+            "narrator_changes_sha256" in error for error in default_quality_errors
+        )
+        write_json(narrator_review_path, narrator_review)
+        narrator_review_path.unlink()
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(archaic_locutor),
+            "--output-dir",
+            str(audio_root / "chatterbox-missing-quality"),
+            "--book-root",
+            str(image_book_root),
+            "--require-quality",
+            "--format",
+            "wav",
+        )
+        invalid_narrator_review = copy.deepcopy(narrator_review)
+        invalid_narrator_review["output_sha256"] = "0" * 64
+        write_json(narrator_review_path, invalid_narrator_review)
+        run_fails(
+            str(ROOT / "validate_narrator_quality.py"),
+            "--book-root",
+            str(image_book_root),
+            "--input-file",
+            str(archaic_locutor),
+        )
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(archaic_locutor),
+            "--output-dir",
+            str(audio_root / "chatterbox-invalid-quality"),
+            "--book-root",
+            str(image_book_root),
+            "--require-quality",
+            "--format",
+            "wav",
+        )
+        write_json(narrator_review_path, narrator_review)
+        run(
+            str(ROOT / "validate_narrator_quality.py"),
+            "--book-root",
+            str(image_book_root),
+            "--input-file",
+            str(archaic_locutor),
+        )
         image_epub_manifest = image_book_root / "metadata" / "epub-manifest.json"
         missing_chapter_outputs = copy.deepcopy(image_ledger)
         missing_chapter_outputs.pop("chapter_outputs")
@@ -868,6 +2878,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -890,6 +2902,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -903,6 +2917,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -936,6 +2952,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -955,6 +2973,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -972,6 +2992,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -1017,7 +3039,7 @@ def main() -> None:
             assert "OEBPS/fonts/IMFeENit28P.ttf" in archive.namelist()
             assert "OEBPS/fonts/OFL.txt" in archive.namelist()
             stylesheet = archive.read("OEBPS/styles/book.css").decode("utf-8")
-            for color in ("#F3E7C9", "#3B2A1F", "#6B5140", "#4A2F22", "#B89B72", "#8C5A2B"):
+            for color in ("#FFFFFF", "#000000"):
                 assert color in stylesheet
             assert 'font-family: "IM FELL English";' in stylesheet
             assert "../fonts/IMFeENrm28P.ttf" in stylesheet
@@ -1044,7 +3066,8 @@ def main() -> None:
         assert visual_sidecar["visual_profile"]["cover"]["epub_path"] == "OEBPS/images/editorial-cover.jpg"
         assert len(visual_sidecar["visual_profile"]["resources"]) == 3
 
-        from PIL import ImageFont
+        from io import BytesIO
+        from PIL import Image, ImageFont
         from epub_presentation import cover_image
 
         font = ImageFont.truetype(
@@ -1064,6 +3087,8 @@ def main() -> None:
             }
         )
         assert long_cover.startswith(b"\xff\xd8")
+        with Image.open(BytesIO(long_cover)) as generated_cover:
+            assert generated_cover.getpixel((0, 0)) == (255, 255, 255)
         try:
             cover_image({"title": "X" * 2000})
         except RuntimeError:
@@ -1260,6 +3285,8 @@ def main() -> None:
             str(image_assets_path),
             "--text-root",
             str(image_text_root),
+            "--layout",
+            "legacy",
             "--output",
             str(image_epub_manifest),
         )
@@ -1294,7 +3321,7 @@ def main() -> None:
         audio_root = image_book_root / "audio"
         mock_wav = audio_root / "mock" / "wav" / "audiobook.wav"
         mock_wav.parent.mkdir(parents=True)
-        write_wav(mock_wav, b"\x00\x00" * SAMPLE_RATE)
+        write_wav(mock_wav, speech_frames)
         assert mock_wav.is_file()
         compressed_audio_root = audio_root / "mock" / "m4a"
         compressed_audio_root.mkdir(parents=True)
@@ -1366,11 +3393,23 @@ def main() -> None:
         real_audio = audio_root / "real" / "audiobook.m4a"
         real_audio.parent.mkdir(parents=True, exist_ok=True)
         real_audio.write_bytes(compressed_audio.read_bytes())
+        real_lineage = {
+            "schema_version": narrator_changes["schema_version"],
+            "narrator_changes_sha256": sha256_file(narrator_changes_path),
+            "mode": narrator_changes["mode"],
+            "base_edition": narrator_changes["base_edition"],
+            "base_ledger_sha256": narrator_changes["base_ledger_sha256"],
+            "output_id": narrator_changes["outputs"][0]["id"],
+            "path": "metadata/narrator-changes.json",
+        }
         real_manifest = {
             "schema_version": "1.0",
             "mock": False,
             "render_mode": "real",
             "engine": "chatterbox-multilingual-v3-pt-br",
+            "input_file": archaic_locutor.relative_to(image_book_root).as_posix(),
+            "input_sha256": sha256_file(archaic_locutor),
+            "narrator_lineage": real_lineage,
             "final_audio": real_audio.relative_to(image_book_root).as_posix(),
             "final_audio_sha256": sha256_file(real_audio),
         }
@@ -1391,6 +3430,19 @@ def main() -> None:
         audio_manifest_path.write_text(
             json.dumps(real_manifest, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
+        )
+        untracked_real_manifest = dict(real_manifest)
+        untracked_real_manifest.pop("narrator_lineage")
+        audio_manifest_path.write_text(
+            json.dumps(untracked_real_manifest, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run_fails(
+            str(ROOT / "publish_artifacts.py"),
+            "--book-root",
+            str(image_book_root),
+            "--audio",
+            str(real_audio),
         )
         non_chatterbox_manifest = dict(real_manifest)
         non_chatterbox_manifest.pop("engine")
@@ -1423,6 +3475,30 @@ def main() -> None:
         assert not published_audio.exists()
         assert not published_epub.exists()
         assert "publication" not in json.loads(audio_manifest_path.read_text(encoding="utf-8"))
+        revised_epub = image_book_root / "exports" / "epub" / "revised.epub"
+        revised_epub.write_bytes(restored_epub.read_bytes())
+        revised_sidecar = json.loads(
+            restored_epub.with_suffix(".epub.json").read_text(encoding="utf-8")
+        )
+        revised_sidecar["epub_path"] = revised_epub.relative_to(image_book_root).as_posix()
+        revised_sidecar["epub_sha256"] = sha256_file(revised_epub)
+        revised_sidecar["text_edition"] = "revised-pt-br"
+        revised_epub.with_suffix(".epub.json").write_text(
+            json.dumps(revised_sidecar, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        run(
+            str(ROOT / "publish_artifacts.py"),
+            "--book-root",
+            str(image_book_root),
+            "--epub",
+            str(revised_epub),
+        )
+        published_revised_epub = image_book_root / revised_epub.name
+        assert published_revised_epub.read_bytes() == revised_epub.read_bytes()
+        assert json.loads(
+            revised_epub.with_suffix(".epub.json").read_text(encoding="utf-8")
+        )["publication"]["text_edition"] == "revised-pt-br"
         run(
             str(ROOT / "publish_artifacts.py"),
             "--book-root",
@@ -1503,6 +3579,21 @@ def main() -> None:
             "wav",
         )
         assert not chatterbox_invalid_output.exists()
+        untracked_locutor = image_text_root / "locutor" / "chapters" / "untracked.txt"
+        untracked_locutor.write_text("Texto de locutor sem linhagem declarada.", encoding="utf-8")
+        untracked_lineage_output = audio_root / "chatterbox-untracked-lineage"
+        run_fails(
+            str(ROOT / "render_chatterbox.py"),
+            "--input-file",
+            str(untracked_locutor),
+            "--output-dir",
+            str(untracked_lineage_output),
+            "--book-root",
+            str(image_book_root),
+            "--format",
+            "wav",
+        )
+        assert not untracked_lineage_output.exists()
 
         plugin_root = ROOT.parent
         marketplace = {
@@ -1551,6 +3642,7 @@ def main() -> None:
                 "cuda",
                 "--format",
                 "wav",
+                "--overwrite",
             )
             chatterbox_manifest = json.loads(
                 (chatterbox_smoke_output / "audio-manifest.json").read_text(
@@ -1592,6 +3684,37 @@ def main() -> None:
             assert (
                 chatterbox_manifest["final_audio_sha256"]
                 == sha256_file(chatterbox_final_audio)
+            )
+            chatterbox_lineage_output = audio_root / "chatterbox-cuda-lineage"
+            run_with_python(
+                chatterbox_python,
+                str(ROOT / "render_chatterbox.py"),
+                "--book-root",
+                str(image_book_root),
+                "--input-file",
+                str(archaic_locutor),
+                "--output-dir",
+                str(chatterbox_lineage_output),
+                "--device",
+                "cuda",
+                "--format",
+                "wav",
+                "--overwrite",
+            )
+            chatterbox_lineage_manifest = json.loads(
+                (image_book_root / "metadata" / "audio-manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            assert chatterbox_lineage_manifest["profile"] == "feminina-v1"
+            assert chatterbox_lineage_manifest["narrator_lineage"]["mode"] == "archaic-modernized"
+            assert (
+                chatterbox_lineage_manifest["narrator_lineage"]["output_id"]
+                == narrator_changes["outputs"][0]["id"]
+            )
+            assert (
+                chatterbox_lineage_manifest["final_audio_sha256"]
+                == sha256_file(chatterbox_lineage_output / "audiobook.wav")
             )
 
     print("Audiobook Codex script tests passed.")
