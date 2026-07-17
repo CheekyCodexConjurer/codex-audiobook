@@ -1,5 +1,12 @@
 {
   "schema_version": "1.0",
+  "book": {
+    "title": "",
+    "subtitle": "",
+    "author": "",
+    "original_publication_year": 0,
+    "original_publication_place": ""
+  },
   "source": {
     "path": "source/original.pdf",
     "original_path": "",

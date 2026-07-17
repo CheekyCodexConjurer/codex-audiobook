@@ -25,7 +25,13 @@ def run(*args: str) -> None:
 
 
 def run_with_python(python: str, *args: str) -> None:
-    completed = subprocess.run([python, *args], text=True, capture_output=True)
+    normalized = list(args)
+    for index, value in enumerate(normalized[:-1]):
+        if value == "--book-root":
+            candidate = Path(normalized[index + 1])
+            if candidate.name.casefold() == "assembly":
+                normalized[index + 1] = str(candidate.parent)
+    completed = subprocess.run([python, *normalized], text=True, capture_output=True)
     if completed.returncode != 0:
         raise AssertionError(
             f"Command failed: {' '.join(args)}\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
@@ -33,7 +39,13 @@ def run_with_python(python: str, *args: str) -> None:
 
 
 def run_fails(*args: str) -> None:
-    completed = subprocess.run([sys.executable, *args], text=True, capture_output=True)
+    normalized = list(args)
+    for index, value in enumerate(normalized[:-1]):
+        if value == "--book-root":
+            candidate = Path(normalized[index + 1])
+            if candidate.name.casefold() == "assembly":
+                normalized[index + 1] = str(candidate.parent)
+    completed = subprocess.run([sys.executable, *normalized], text=True, capture_output=True)
     if completed.returncode == 0:
         raise AssertionError(f"Command unexpectedly succeeded: {' '.join(args)}")
 
@@ -1154,7 +1166,8 @@ def main() -> None:
             writer.write(target)
 
         library_root = root / "library"
-        book_root = library_root / "source"
+        public_book_root = library_root / "Livro Fonte - 1933 - Autor Teste"
+        book_root = public_book_root / "assembly"
         map_path = book_root / "metadata" / "book-map.json"
         run(
             str(ROOT / "preflight.py"),
@@ -1162,6 +1175,12 @@ def main() -> None:
             str(pdf_path),
             "--library-root",
             str(library_root),
+            "--title",
+            "Livro Fonte",
+            "--publication-year",
+            "1933",
+            "--author",
+            "Autor Teste",
             "--dpi",
             "72",
         )
@@ -1179,18 +1198,21 @@ def main() -> None:
         second_writer.add_blank_page(width=360, height=540)
         with same_name_pdf.open("wb") as target:
             second_writer.write(target)
-        collision_root = library_root / f"source-{sha256_file(same_name_pdf)[:8]}"
-        run(
+        run_fails(
             str(ROOT / "preflight.py"),
             "--source",
             str(same_name_pdf),
             "--library-root",
             str(library_root),
+            "--title",
+            "Livro Fonte",
+            "--publication-year",
+            "1933",
+            "--author",
+            "Autor Teste",
             "--dpi",
             "72",
         )
-        assert (collision_root / "metadata" / "book-map.json").is_file()
-        assert (collision_root / "source" / "original.pdf").read_bytes() == same_name_pdf.read_bytes()
 
         escaped_map = json.loads(map_path.read_text(encoding="utf-8"))
         escaped_map["pages"][0]["render_path"] = "../outside.png"
@@ -1261,7 +1283,7 @@ def main() -> None:
             (
                 Path("source"),
                 Path("assets") / "images" / "original",
-                Path("restoration") / "approved",
+                Path("assets") / "restoration" / "approved",
                 Path("text") / "source" / "pages",
                 Path("text") / "locutor",
             ),
@@ -1283,7 +1305,8 @@ def main() -> None:
             )
 
         spread_library = root / "spread-library"
-        spread_root = spread_library / "spread-book"
+        spread_public_root = spread_library / "Livro Aberto - 1934 - Autor Teste"
+        spread_root = spread_public_root / "assembly"
         spread_map = spread_root / "metadata" / "book-map.json"
         run(
             str(ROOT / "preflight.py"),
@@ -1291,8 +1314,12 @@ def main() -> None:
             str(pdf_path),
             "--library-root",
             str(spread_library),
-            "--book-id",
-            "spread-book",
+            "--title",
+            "Livro Aberto",
+            "--publication-year",
+            "1934",
+            "--author",
+            "Autor Teste",
             "--layout",
             "spread",
             "--dpi",
@@ -1305,7 +1332,8 @@ def main() -> None:
 
         epub_path = root / "source.epub"
         epub_library = root / "epub-library"
-        epub_root = epub_library / "epub-book"
+        epub_public_root = epub_library / "Livro EPUB - 2024 - Autora EPUB"
+        epub_root = epub_public_root / "assembly"
         write_epub(epub_path)
         run(
             str(ROOT / "preflight.py"),
@@ -1313,8 +1341,12 @@ def main() -> None:
             str(epub_path),
             "--library-root",
             str(epub_library),
-            "--book-id",
-            "epub-book",
+            "--title",
+            "Livro EPUB",
+            "--publication-year",
+            "2024",
+            "--author",
+            "Autora EPUB",
         )
         epub_map = epub_root / "metadata" / "book-map.json"
         run(str(ROOT / "validate_book_map.py"), "--book-map", str(epub_map))
@@ -2123,7 +2155,8 @@ def main() -> None:
         image_jpeg = root / "image-source.jpg"
         write_pdf_with_image(image_pdf, image_jpeg)
         image_library = root / "image-library"
-        image_book_root = image_library / "image-source"
+        image_public_root = image_library / "Livro com Imagem - 1933 - Antônio de Teste"
+        image_book_root = image_public_root / "assembly"
         image_map_path = image_book_root / "metadata" / "book-map.json"
         run(
             str(ROOT / "preflight.py"),
@@ -2131,6 +2164,12 @@ def main() -> None:
             str(image_pdf),
             "--library-root",
             str(image_library),
+            "--title",
+            "Livro com Imagem",
+            "--publication-year",
+            "1933",
+            "--author",
+            "Antônio de Teste",
             "--dpi",
             "72",
         )
@@ -2182,6 +2221,12 @@ def main() -> None:
             str(image_pdf),
             "--library-root",
             str(image_library),
+            "--title",
+            "Livro com Imagem",
+            "--publication-year",
+            "1933",
+            "--author",
+            "Antônio de Teste",
             "--assets-only",
         )
         refreshed_assets = json.loads(image_assets_path.read_text(encoding="utf-8"))
@@ -3146,7 +3191,13 @@ def main() -> None:
         image_assets = json.loads(image_assets_path.read_text(encoding="utf-8"))
         original_asset = image_assets["assets"][0]
         original_path = image_book_root / original_asset["original"]["path"]
-        restored_path = image_book_root / "restoration" / "approved" / f"{original_path.stem}.png"
+        restored_path = (
+            image_book_root
+            / "assets"
+            / "restoration"
+            / "approved"
+            / f"{original_path.stem}.png"
+        )
         restored_path.parent.mkdir(parents=True)
         from PIL import Image
 
@@ -3256,7 +3307,8 @@ def main() -> None:
         escaped_approved_assets = copy.deepcopy(image_assets)
         escaped_approved = escaped_approved_assets["assets"][0]["restoration"]["approved"]
         escaped_approved["path"] = (
-            "restoration/approved/../../assets/images/original/" + original_path.name
+            "assets/restoration/approved/../../../assets/images/original/"
+            + original_path.name
         )
         escaped_approved["sha256"] = original_asset["original"]["sha256"]
         escaped_approved["media_type"] = original_asset["original"]["media_type"]
@@ -3385,14 +3437,14 @@ def main() -> None:
             "--audio",
             str(compressed_audio),
         )
-        published_audio = image_book_root / "Livro-com-Acao-audiobook.m4a"
-        published_epub = image_book_root / "restored.epub"
+        published_audio = image_public_root / f"{image_public_root.name}.mp3"
+        published_epub = image_public_root / f"{image_public_root.name}.epub"
         assert not published_audio.exists()
         assert not published_epub.exists()
 
-        real_audio = audio_root / "real" / "audiobook.m4a"
+        real_audio = audio_root / "real" / "audiobook.mp3"
         real_audio.parent.mkdir(parents=True, exist_ok=True)
-        real_audio.write_bytes(compressed_audio.read_bytes())
+        real_audio.write_bytes(mp3_audio.read_bytes())
         real_lineage = {
             "schema_version": narrator_changes["schema_version"],
             "narrator_changes_sha256": sha256_file(narrator_changes_path),
@@ -3425,7 +3477,7 @@ def main() -> None:
             "--audio",
             str(real_audio),
         )
-        real_audio.write_bytes(compressed_audio.read_bytes())
+        real_audio.write_bytes(mp3_audio.read_bytes())
         real_manifest["final_audio_sha256"] = sha256_file(real_audio)
         audio_manifest_path.write_text(
             json.dumps(real_manifest, ensure_ascii=False, indent=2) + "\n",
@@ -3490,11 +3542,11 @@ def main() -> None:
         run(
             str(ROOT / "publish_artifacts.py"),
             "--book-root",
-            str(image_book_root),
+            str(image_public_root),
             "--epub",
             str(revised_epub),
         )
-        published_revised_epub = image_book_root / revised_epub.name
+        published_revised_epub = image_public_root / f"{image_public_root.name}.epub"
         assert published_revised_epub.read_bytes() == revised_epub.read_bytes()
         assert json.loads(
             revised_epub.with_suffix(".epub.json").read_text(encoding="utf-8")
@@ -3507,6 +3559,7 @@ def main() -> None:
             str(real_audio),
             "--epub",
             str(restored_epub),
+            "--overwrite",
         )
         assert published_audio.read_bytes() == real_audio.read_bytes()
         assert published_epub.read_bytes() == restored_epub.read_bytes()

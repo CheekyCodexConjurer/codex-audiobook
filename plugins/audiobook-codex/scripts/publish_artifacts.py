@@ -7,11 +7,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import sys
-import unicodedata
 
+from book_layout import BookPaths, resolve_book_paths
 from path_safety import resolve_under
 from validate_narrator_lineage import validate_lineage
 
@@ -19,6 +18,8 @@ from validate_narrator_lineage import validate_lineage
 CHATTERBOX_ENGINE = "chatterbox-multilingual-v3-pt-br"
 EPUB_TEXT_EDITIONS = {"original", "revised-pt-br", "translated-pt-br"}
 EPUB_IMAGE_EDITIONS = {"original", "approved-restored"}
+PDF_TEXT_EDITIONS = EPUB_TEXT_EDITIONS
+PDF_IMAGE_EDITIONS = EPUB_IMAGE_EDITIONS
 
 
 @dataclass(frozen=True)
@@ -59,16 +60,6 @@ def json_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
-def safe_segment(value: str, fallback: str) -> str:
-    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", ascii_value)
-    return normalized.strip(".-")[:100] or fallback
-
-
-def relative_to_book(book_root: Path, path: Path) -> str:
-    return path.resolve().relative_to(book_root.resolve()).as_posix()
-
-
 def require_under(path: Path, root: Path, label: str) -> None:
     try:
         path.resolve().relative_to(root.resolve())
@@ -76,25 +67,14 @@ def require_under(path: Path, root: Path, label: str) -> None:
         raise RuntimeError(f"{label} must remain under {root}: {path}") from error
 
 
-def title_slug(book_root: Path) -> str:
-    for manifest_name in ("epub-manifest.json", "book-map.json"):
-        path = book_root / "metadata" / manifest_name
-        if not path.is_file():
-            continue
-        data = load_json(path)
-        book = data.get("book") if isinstance(data, dict) else None
-        title = book.get("title") if isinstance(book, dict) else None
-        if isinstance(title, str) and title.strip():
-            return safe_segment(title, "audiobook")
-    return safe_segment(book_root.name, "audiobook")
-
-
-def publication_record(book_root: Path, source: Path, destination: Path) -> dict:
+def publication_record(paths: BookPaths, source: Path, destination: Path) -> dict:
     source_hash = sha256_file(source)
     return {
-        "path": relative_to_book(book_root, destination),
+        "path": paths.relative_to_public(destination),
+        "path_root": "book",
         "sha256": source_hash,
-        "source_path": relative_to_book(book_root, source),
+        "source_path": paths.relative_to_assembly(source),
+        "source_path_root": "assembly",
         "source_sha256": source_hash,
         "published_at": iso_now(),
     }
@@ -116,7 +96,10 @@ def require_real_audio_manifest(book_root: Path, source: Path) -> tuple[Path, di
         pass
     else:
         raise RuntimeError("Refusing to publish audio from audio/mock")
-    if manifest.get("final_audio") != relative_to_book(book_root, source):
+    if (
+        manifest.get("final_audio")
+        != source.resolve().relative_to(book_root.resolve()).as_posix()
+    ):
         raise RuntimeError("Audio source does not match metadata/audio-manifest.json final_audio")
     if manifest.get("final_audio_sha256") != sha256_file(source):
         raise RuntimeError("Audio source SHA-256 does not match metadata/audio-manifest.json")
@@ -146,30 +129,30 @@ def require_real_audio_manifest(book_root: Path, source: Path) -> tuple[Path, di
     return manifest_path, manifest
 
 
-def prepare_audio_publication(book_root: Path, source: Path) -> tuple[Publication, Path, dict]:
-    if source.suffix.lower() not in {".m4a", ".mp3", ".wav"}:
-        raise RuntimeError("Published audiobook audio must use .m4a, .mp3, or .wav")
-    manifest_path, manifest = require_real_audio_manifest(book_root, source)
-    destination = book_root / f"{title_slug(book_root)}-audiobook{source.suffix.lower()}"
+def prepare_audio_publication(paths: BookPaths, source: Path) -> tuple[Publication, Path, dict]:
+    if source.suffix.lower() != ".mp3":
+        raise RuntimeError("Published audiobook audio must use the .mp3 extension")
+    manifest_path, manifest = require_real_audio_manifest(paths.assembly_root, source)
+    destination = paths.public_root / f"{paths.public_root.name}.mp3"
     publication = Publication(
         "audio",
         source,
         destination,
-        publication_record(book_root, source, destination),
+        publication_record(paths, source, destination),
     )
     manifest["publication"] = publication.record
     return publication, manifest_path, manifest
 
 
-def prepare_epub_publication(book_root: Path, source: Path) -> tuple[Publication, Path, dict]:
+def prepare_epub_publication(paths: BookPaths, source: Path) -> tuple[Publication, Path, dict]:
     if source.suffix.lower() != ".epub":
         raise RuntimeError("Published EPUB must use the .epub extension")
-    require_under(source, book_root / "exports" / "epub", "EPUB source")
+    require_under(source, paths.assembly_root / "exports" / "epub", "EPUB source")
     sidecar_path = source.with_suffix(".epub.json")
     sidecar = load_json(sidecar_path)
     if not isinstance(sidecar, dict):
         raise RuntimeError(f"EPUB sidecar must be a JSON object: {sidecar_path}")
-    if sidecar.get("epub_path") != relative_to_book(book_root, source):
+    if sidecar.get("epub_path") != paths.relative_to_assembly(source):
         raise RuntimeError("EPUB sidecar path does not match the source EPUB")
     if sidecar.get("epub_sha256") != sha256_file(source):
         raise RuntimeError("EPUB sidecar SHA-256 does not match the source EPUB")
@@ -179,12 +162,45 @@ def prepare_epub_publication(book_root: Path, source: Path) -> tuple[Publication
         raise RuntimeError("EPUB sidecar text edition is invalid")
     if image_edition not in EPUB_IMAGE_EDITIONS:
         raise RuntimeError("EPUB sidecar image edition is invalid")
-    destination = book_root / source.name
-    record = publication_record(book_root, source, destination)
+    destination = paths.public_root / f"{paths.public_root.name}.epub"
+    record = publication_record(paths, source, destination)
     record["text_edition"] = text_edition
     record["image_edition"] = image_edition
     publication = Publication(
         "epub",
+        source,
+        destination,
+        record,
+        f"{text_edition}:{image_edition}",
+    )
+    sidecar["publication"] = publication.record
+    return publication, sidecar_path, sidecar
+
+
+def prepare_pdf_publication(paths: BookPaths, source: Path) -> tuple[Publication, Path, dict]:
+    if source.suffix.lower() != ".pdf":
+        raise RuntimeError("Published PDF must use the .pdf extension")
+    require_under(source, paths.assembly_root / "exports" / "pdf", "PDF source")
+    sidecar_path = source.with_suffix(".pdf.json")
+    sidecar = load_json(sidecar_path)
+    if not isinstance(sidecar, dict):
+        raise RuntimeError(f"PDF sidecar must be a JSON object: {sidecar_path}")
+    if sidecar.get("pdf_path") != paths.relative_to_assembly(source):
+        raise RuntimeError("PDF sidecar path does not match the source PDF")
+    if sidecar.get("pdf_sha256") != sha256_file(source):
+        raise RuntimeError("PDF sidecar SHA-256 does not match the source PDF")
+    text_edition = sidecar.get("text_edition", "original")
+    image_edition = sidecar.get("image_edition", "original")
+    if text_edition not in PDF_TEXT_EDITIONS:
+        raise RuntimeError("PDF sidecar text edition is invalid")
+    if image_edition not in PDF_IMAGE_EDITIONS:
+        raise RuntimeError("PDF sidecar image edition is invalid")
+    destination = paths.public_root / f"{paths.public_root.name}.pdf"
+    record = publication_record(paths, source, destination)
+    record["text_edition"] = text_edition
+    record["image_edition"] = image_edition
+    publication = Publication(
+        "pdf",
         source,
         destination,
         record,
@@ -200,6 +216,23 @@ def validate_destination(publication: Publication, overwrite: bool) -> None:
         return
     if sha256_file(destination) != publication.record["source_sha256"] and not overwrite:
         raise RuntimeError(f"Publication target already exists: {destination}. Use --overwrite.")
+
+
+def validate_public_entries(paths: BookPaths) -> None:
+    if paths.layout_kind != "new":
+        return
+    allowed = {
+        "assembly",
+        *(f"{paths.public_root.name}{suffix}" for suffix in (".epub", ".pdf", ".mp3")),
+    }
+    unsupported = sorted(
+        entry.name for entry in paths.public_root.iterdir() if entry.name not in allowed
+    )
+    if unsupported:
+        raise RuntimeError(
+            "Book root contains entries outside the selected publication set: "
+            + ", ".join(unsupported)
+        )
 
 
 def temporary_path(destination: Path, index: int, kind: str) -> Path:
@@ -268,21 +301,21 @@ def commit_transaction(replacements: list[StagedReplacement]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Copy final Audiobook Codex audio and EPUB artifacts into the book root."
+        description="Copy final Audiobook Codex audio, EPUB, and PDF artifacts into the book root."
     )
     parser.add_argument("--book-root", required=True, type=Path)
     parser.add_argument("--audio", type=Path)
     parser.add_argument("--epub", type=Path)
+    parser.add_argument("--pdf", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
-    if args.audio is None and args.epub is None:
-        raise SystemExit("At least one of --audio or --epub is required.")
+    if args.audio is None and args.epub is None and args.pdf is None:
+        raise SystemExit("At least one of --audio, --epub, or --pdf is required.")
 
     try:
-        book_root = args.book_root.expanduser().resolve()
-        if not book_root.is_dir():
-            raise RuntimeError(f"Book root does not exist: {book_root}")
+        paths = resolve_book_paths(args.book_root, allow_legacy=True)
+        book_root = paths.assembly_root
 
         publications: list[Publication] = []
         metadata_updates: list[tuple[Path, dict]] = []
@@ -290,17 +323,25 @@ def main() -> None:
             source = args.audio.expanduser().resolve()
             if not source.is_file():
                 raise RuntimeError(f"Audio source is missing: {source}")
-            publication, manifest_path, manifest = prepare_audio_publication(book_root, source)
+            publication, manifest_path, manifest = prepare_audio_publication(paths, source)
             publications.append(publication)
             metadata_updates.append((manifest_path, manifest))
         if args.epub is not None:
             source = args.epub.expanduser().resolve()
             if not source.is_file():
                 raise RuntimeError(f"EPUB source is missing: {source}")
-            publication, sidecar_path, sidecar = prepare_epub_publication(book_root, source)
+            publication, sidecar_path, sidecar = prepare_epub_publication(paths, source)
+            publications.append(publication)
+            metadata_updates.append((sidecar_path, sidecar))
+        if args.pdf is not None:
+            source = args.pdf.expanduser().resolve()
+            if not source.is_file():
+                raise RuntimeError(f"PDF source is missing: {source}")
+            publication, sidecar_path, sidecar = prepare_pdf_publication(paths, source)
             publications.append(publication)
             metadata_updates.append((sidecar_path, sidecar))
 
+        validate_public_entries(paths)
         for publication in publications:
             validate_destination(publication, args.overwrite)
 
@@ -315,7 +356,7 @@ def main() -> None:
             {
                 publication.kind: publication.record
                 for publication in publications
-                if publication.kind != "epub"
+                if publication.kind not in {"epub", "pdf"}
             }
         )
         epub_publications = [publication for publication in publications if publication.kind == "epub"]
@@ -328,11 +369,21 @@ def main() -> None:
                 if publication.edition_key is not None:
                     editions[publication.edition_key] = publication.record
             artifacts["epub_editions"] = editions
+        pdf_publications = [publication for publication in publications if publication.kind == "pdf"]
+        if pdf_publications:
+            editions = artifacts.get("pdf_editions")
+            if not isinstance(editions, dict):
+                editions = {}
+            for publication in pdf_publications:
+                artifacts["pdf"] = publication.record
+                if publication.edition_key is not None:
+                    editions[publication.edition_key] = publication.record
+            artifacts["pdf_editions"] = editions
         metadata_updates.append(
             (
                 publication_manifest_path,
                 {
-                    "schema_version": "1.0",
+                    "schema_version": "1.1",
                     "published_at": iso_now(),
                     "artifacts": artifacts,
                 },

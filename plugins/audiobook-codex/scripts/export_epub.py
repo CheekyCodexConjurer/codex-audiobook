@@ -10,6 +10,7 @@ import re
 import sys
 import zipfile
 
+from book_layout import resolve_book_paths
 from epub_layout import layout_document_index
 from epub_layout import lines_for_block
 from epub_layout import load_json as load_layout_json
@@ -1168,7 +1169,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        book_root = args.book_root.expanduser().resolve()
+        book_root = resolve_book_paths(args.book_root).assembly_root
         epub_manifest_path = (
             args.epub_manifest.expanduser().resolve()
             if args.epub_manifest

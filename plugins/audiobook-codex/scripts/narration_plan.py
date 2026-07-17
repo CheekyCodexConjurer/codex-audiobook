@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from unicodedata import normalize
 
+from book_layout import resolve_book_paths
 from chatterbox_text import (
     NarratorSegment,
     NarratorTextError,
@@ -828,7 +829,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        book_root = args.book_root.expanduser().resolve()
+        book_root = resolve_book_paths(args.book_root).assembly_root
         input_file = (
             args.input_file.expanduser().resolve()
             if args.input_file

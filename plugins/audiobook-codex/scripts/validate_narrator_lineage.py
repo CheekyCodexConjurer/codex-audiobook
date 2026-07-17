@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from unicodedata import normalize
 
+from book_layout import resolve_book_paths
 from path_safety import resolve_under
 from verify_text_ledger import chapter_output_records, verify as verify_text_ledger
 from verify_translation_ledger import (
@@ -557,7 +558,7 @@ def main() -> None:
     parser.add_argument("--input-file", type=Path)
     args = parser.parse_args()
 
-    book_root = args.book_root.expanduser().resolve()
+    book_root = resolve_book_paths(args.book_root).assembly_root
     narrator_changes = (
         args.narrator_changes.expanduser().resolve()
         if args.narrator_changes

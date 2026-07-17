@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from book_layout import resolve_book_paths
 from chapter_audio import (
     SCHEMA_VERSION,
     _chapter_records,
@@ -203,7 +204,7 @@ def main() -> None:
     parser.add_argument("--journal", type=Path)
     parser.add_argument("--manifest", type=Path)
     args = parser.parse_args()
-    book_root = args.book_root.expanduser().resolve()
+    book_root = resolve_book_paths(args.book_root).assembly_root
     output_dir = args.output_dir.expanduser().resolve()
     plan_path = (
         args.narration_plan.expanduser().resolve()

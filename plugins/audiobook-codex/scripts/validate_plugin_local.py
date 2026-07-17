@@ -141,9 +141,12 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
                 errors.append(str(error))
 
     for filename in (
+        "book_layout.py",
         "preflight.py",
+        "migrate_library_layout.py",
         "asset_inventory.py",
         "validate_book_map.py",
+        "validate_book_layout.py",
         "validate_assets_manifest.py",
         "verify_text_ledger.py",
         "verify_translation_ledger.py",
@@ -167,6 +170,7 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "render_chatterbox.py",
         "chatterbox_text.py",
         "publish_artifacts.py",
+        "test_book_layout.py",
         "test_tools.py",
     ):
         if not (plugin_root / "scripts" / filename).is_file():

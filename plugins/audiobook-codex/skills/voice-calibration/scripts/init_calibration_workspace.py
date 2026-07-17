@@ -7,7 +7,7 @@ import sys
 from calibration_workspace import PROMPTS, WorkspaceError, draft_corpus, validate_profile_id, write_json
 
 
-DEFAULT_LIBRARY_ROOT = Path(r"E:\Pessoal\e-books")
+DEFAULT_LIBRARY_ROOT = Path(r"E:\Pessoal\Library")
 
 
 def initialize_workspace(profile_id: str, target_library_root: Path = DEFAULT_LIBRARY_ROOT) -> Path:

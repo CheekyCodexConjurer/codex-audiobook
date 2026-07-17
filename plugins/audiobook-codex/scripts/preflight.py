@@ -10,14 +10,21 @@ import re
 import shutil
 import subprocess
 import sys
-import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
 
 from asset_inventory import source_image_assets, write_assets_manifest
-
-
-DEFAULT_LIBRARY_ROOT = Path(r"E:\Pessoal\e-books")
+from book_layout import (
+    DEFAULT_LIBRARY_ROOT,
+    BookPaths,
+    assert_no_reparse_ancestors,
+    canonical_book_folder_name,
+    ensure_assembly_tree,
+    lexical_absolute,
+    path_lexists,
+    paths_for_new_book,
+    resolve_book_paths,
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -44,58 +51,79 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
-def normalize_book_id(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
-    normalized = re.sub(r"[^A-Za-z0-9]+", "-", normalized).strip("-. ")
-    if not normalized:
-        raise RuntimeError("Could not derive a safe book folder name from the source filename.")
-    return normalized[:120].rstrip(". ")
-
-
-def stored_source_path(book_root: Path, source: Path) -> Path:
-    return book_root / "source" / f"original{source.suffix.lower()}"
+def stored_source_path(assembly_root: Path, source: Path) -> Path:
+    return assembly_root / "source" / f"original{source.suffix.lower()}"
 
 
 def select_book_root(
     source: Path,
     source_sha256: str,
     library_root: Path,
-    requested_book_id: str,
+    title: str,
+    publication_year: int,
+    author: str,
     explicit_output_dir: Path | None,
-) -> Path:
+) -> BookPaths:
+    expected_name = canonical_book_folder_name(title, publication_year, author)
     if explicit_output_dir is not None:
-        return explicit_output_dir.expanduser().resolve()
-
-    library_root = library_root.expanduser().resolve()
-    library_root.mkdir(parents=True, exist_ok=True)
-    book_id = normalize_book_id(requested_book_id or source.stem)
-    candidate = library_root / book_id
-    if not candidate.exists():
-        return candidate
-
-    candidate_source = stored_source_path(candidate, source)
-    if candidate_source.is_file() and sha256_file(candidate_source) == source_sha256:
-        return candidate
-
-    if requested_book_id:
-        raise RuntimeError(
-            f"Book id already belongs to another source: {candidate}. Choose a different --book-id."
+        public_root = lexical_absolute(explicit_output_dir)
+        if path_lexists(public_root):
+            try:
+                existing = resolve_book_paths(public_root, allow_legacy=True)
+            except RuntimeError as error:
+                raise RuntimeError(
+                    f"Cannot reuse the explicit book folder: {error}"
+                ) from error
+            if existing.layout_kind == "new" and public_root.name != expected_name:
+                raise RuntimeError(
+                    f"Explicit new-layout book root must use the canonical folder name "
+                    f"{expected_name!r}: {public_root}"
+                )
+            candidate_source = stored_source_path(existing.assembly_root, source)
+            if (
+                candidate_source.is_file()
+                and sha256_file(candidate_source) == source_sha256
+            ):
+                return existing
+            raise RuntimeError(
+                f"Explicit book folder belongs to another source: {public_root}"
+            )
+        if public_root.name != expected_name:
+            raise RuntimeError(
+                f"Explicit book root must use the canonical folder name {expected_name!r}: "
+                f"{public_root}"
+            )
+        paths = BookPaths(public_root, public_root / "assembly", "new")
+    else:
+        library_root = assert_no_reparse_ancestors(library_root, "Library root")
+        library_root.mkdir(parents=True, exist_ok=True)
+        assert_no_reparse_ancestors(library_root, "Library root")
+        paths = paths_for_new_book(
+            library_root,
+            title,
+            publication_year,
+            author,
         )
 
-    hash_candidate = library_root / f"{book_id}-{source_sha256[:8]}"
-    if not hash_candidate.exists():
-        return hash_candidate
+    if not paths.public_root.exists():
+        return paths
 
-    stored_hash_candidate = stored_source_path(hash_candidate, source)
-    if stored_hash_candidate.is_file() and sha256_file(stored_hash_candidate) == source_sha256:
-        return hash_candidate
+    try:
+        existing = resolve_book_paths(paths.public_root, allow_legacy=True)
+    except RuntimeError as error:
+        raise RuntimeError(
+            f"Cannot reuse the canonical book folder: {error}"
+        ) from error
+    candidate_source = stored_source_path(existing.assembly_root, source)
+    if candidate_source.is_file() and sha256_file(candidate_source) == source_sha256:
+        return existing
     raise RuntimeError(
-        f"Refusing to reuse an existing book directory with a different source: {hash_candidate}"
+        f"Canonical book folder already belongs to another source: {paths.public_root}"
     )
 
 
-def stage_source(source: Path, book_root: Path, source_sha256: str) -> Path:
-    target = stored_source_path(book_root, source)
+def stage_source(source: Path, assembly_root: Path, source_sha256: str) -> Path:
+    target = stored_source_path(assembly_root, source)
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         if target.resolve() == source.resolve():
@@ -389,17 +417,15 @@ def main() -> None:
         "--library-root",
         type=Path,
         default=DEFAULT_LIBRARY_ROOT,
-        help=r"Library directory for automatic book folders. Defaults to E:\Pessoal\e-books.",
+        help=r"Library directory for automatic book folders. Defaults to E:\Pessoal\Library.",
     )
-    parser.add_argument(
-        "--book-id",
-        default="",
-        help="Optional folder name below --library-root. A safe name is derived from the source by default.",
-    )
+    parser.add_argument("--title", required=True, help="Verified canonical book title.")
+    parser.add_argument("--publication-year", required=True, type=int)
+    parser.add_argument("--author", required=True, help="Verified canonical book author.")
     parser.add_argument(
         "--output-dir",
         type=Path,
-        help="Explicit book root for advanced use. It bypasses automatic --library-root placement.",
+        help="Explicit public book root. Its name must match title, year, and author.",
     )
     parser.add_argument("--layout", choices=("single", "spread"), default="single")
     parser.add_argument("--rotation", choices=("normal", "cw90", "ccw90", "180"), default="normal")
@@ -420,6 +446,8 @@ def main() -> None:
         raise SystemExit(f"Source file not found: {original_source}")
     if args.dpi < 72:
         raise SystemExit("--dpi must be at least 72.")
+    if args.publication_year <= 0:
+        raise SystemExit("--publication-year must be positive.")
 
     source_sha256 = sha256_file(original_source)
     inferred_output_dir = args.output_dir
@@ -429,15 +457,25 @@ def main() -> None:
         and original_source.parent.name.lower() == "source"
         and original_source.stem.lower() == "original"
     ):
-        inferred_output_dir = original_source.parent.parent
+        inferred_assembly = original_source.parent.parent
+        inferred_output_dir = (
+            inferred_assembly.parent
+            if inferred_assembly.name.casefold() == "assembly"
+            else inferred_assembly
+        )
     try:
-        output_root = select_book_root(
+        paths = select_book_root(
             original_source,
             source_sha256,
             args.library_root,
-            str(args.book_id).strip(),
+            str(args.title).strip(),
+            args.publication_year,
+            str(args.author).strip(),
             inferred_output_dir,
         )
+        if paths.layout_kind == "new":
+            ensure_assembly_tree(paths)
+        output_root = paths.assembly_root
         source = stage_source(original_source, output_root, source_sha256)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
@@ -460,7 +498,8 @@ def main() -> None:
             source_sha256,
             source_image_assets(source, output_root, book_map["pages"]),
         )
-        print(f"Book root: {output_root}")
+        print(f"Book root: {paths.public_root}")
+        print(f"Assembly root: {output_root}")
         print(f"Refreshed {assets_path}")
         return
 
@@ -487,6 +526,13 @@ def main() -> None:
 
     book_map = {
         "schema_version": "1.0",
+        "book": {
+            "title": str(args.title).strip(),
+            "subtitle": "",
+            "author": str(args.author).strip(),
+            "original_publication_year": args.publication_year,
+            "original_publication_place": "",
+        },
         "source": preflight["source"],
         "analysis": {
             "status": "needs_analysis",
@@ -519,7 +565,8 @@ def main() -> None:
         source_sha256,
         source_image_assets(source, output_root, pages),
     )
-    print(f"Book root: {output_root}")
+    print(f"Book root: {paths.public_root}")
+    print(f"Assembly root: {output_root}")
     print(f"Stored source: {source}")
     print(f"Created {map_path}")
     print(f"Created {assets_path}")

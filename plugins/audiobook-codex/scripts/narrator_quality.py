@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from unicodedata import normalize
 
+from book_layout import resolve_book_paths
 from path_safety import resolve_under
 
 
@@ -1091,7 +1092,7 @@ def main() -> None:
     parser.add_argument("--narrator-changes", type=Path)
     args = parser.parse_args()
 
-    book_root = args.book_root.expanduser().resolve()
+    book_root = resolve_book_paths(args.book_root).assembly_root
     input_file = args.input_file.expanduser().resolve()
     output = args.output.expanduser().resolve()
     narrator_changes = (

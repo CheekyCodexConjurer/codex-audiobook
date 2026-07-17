@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from book_layout import resolve_book_paths
 from narration_plan import (
     POLICY_NAME,
     SCHEMA_VERSION,
@@ -90,7 +91,7 @@ def main() -> None:
     parser.add_argument("--narration-plan", type=Path)
     args = parser.parse_args()
 
-    book_root = args.book_root.expanduser().resolve()
+    book_root = resolve_book_paths(args.book_root).assembly_root
     input_file = (
         args.input_file.expanduser().resolve()
         if args.input_file

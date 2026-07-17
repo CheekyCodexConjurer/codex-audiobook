@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 import json
 import zipfile
 
+from book_layout import resolve_book_paths
 from epub_presentation import (
     COVER_DOCUMENT_PATH,
     COVER_IMAGE_PATH,
@@ -466,7 +467,7 @@ def main() -> None:
     parser.add_argument("--text-edition", choices=sorted(TEXT_EDITIONS), default="original")
     args = parser.parse_args()
 
-    book_root = args.book_root.expanduser().resolve()
+    book_root = resolve_book_paths(args.book_root).assembly_root
     epub_manifest = (
         args.epub_manifest.expanduser().resolve()
         if args.epub_manifest

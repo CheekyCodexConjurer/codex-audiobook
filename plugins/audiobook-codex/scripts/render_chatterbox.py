@@ -15,6 +15,7 @@ import wave
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+from book_layout import resolve_book_paths
 from chatterbox_text import DEFAULT_MAX_CHARS, prepare_chatterbox_segments
 from chapter_audio import assemble_chapters, chapter_specs
 from narration_plan import load_plan_segments, read_json as read_narration_plan
@@ -1213,7 +1214,7 @@ def main() -> None:
         output_dir = args.output_dir.expanduser().resolve()
         model_root = args.model_root.expanduser().resolve()
         voice_reference = args.voice_reference.expanduser().resolve()
-        book_root = args.book_root.expanduser().resolve() if args.book_root else None
+        book_root = resolve_book_paths(args.book_root).assembly_root if args.book_root else None
         if (book_root is None) != args.standalone:
             raise RuntimeError("Use exactly one of --book-root or --standalone.")
         if (

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 
+from book_layout import resolve_book_paths
 from epub_layout import load_json, sha256_file, validate_layout
 from verify_text_ledger import expected_chapter_outputs
 from verify_text_ledger import verify as verify_text_ledger
@@ -17,7 +18,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        book_root = args.book_root.expanduser().resolve()
+        book_root = resolve_book_paths(args.book_root).assembly_root
         map_path = book_root / "metadata" / "book-map.json"
         ledger_path = book_root / "metadata" / "text-ledger.json"
         layout_path = args.layout.expanduser().resolve() if args.layout else book_root / "metadata" / "epub-layout.json"

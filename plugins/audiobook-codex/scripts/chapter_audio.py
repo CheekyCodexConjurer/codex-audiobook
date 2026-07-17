@@ -11,6 +11,7 @@ import re
 from typing import Iterable
 import wave
 
+from book_layout import resolve_book_paths
 from audio_tools import (
     CHANNELS,
     DEFAULT_PUBLICATION_TEMPO,
@@ -500,7 +501,7 @@ def main() -> None:
     )
     args = parser.parse_args()
     try:
-        book_root = args.book_root.expanduser().resolve()
+        book_root = resolve_book_paths(args.book_root).assembly_root
         output_dir = args.output_dir.expanduser().resolve()
         plan_path = (
             args.narration_plan.expanduser().resolve()

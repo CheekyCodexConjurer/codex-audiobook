@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 
+from book_layout import resolve_book_paths
 from path_safety import resolve_under
 
 
@@ -216,11 +217,11 @@ def validate_assets_manifest(
         target = resolve_under(
             book_root,
             approved_path,
-            (Path("restoration") / "approved",),
+            (Path("assets") / "restoration" / "approved",),
         )
         if target is None:
             errors.append(
-                f"{label}.restoration.approved.path must resolve under restoration/approved/: {approved_path}"
+                f"{label}.restoration.approved.path must resolve under assets/restoration/approved/: {approved_path}"
             )
         elif check_files:
             if not target.is_file():
@@ -287,7 +288,7 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        book_root = args.book_root.expanduser().resolve()
+        book_root = resolve_book_paths(args.book_root).assembly_root
         manifest_path = args.assets_manifest.expanduser().resolve()
         manifest = load_json(manifest_path)
         book_map = load_json(args.book_map.expanduser().resolve()) if args.book_map else None
