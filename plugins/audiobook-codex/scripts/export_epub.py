@@ -705,6 +705,7 @@ def semantic_body_parts(
     global_note_ids: dict[str, str] | None = None,
     note_hrefs: dict[str, str] | None = None,
     global_reference_targets: dict[str, str] | None = None,
+    assets_after_content: bool = False,
 ) -> list[str]:
     before = [figure_markup(asset, href) for asset, href in asset_hrefs if asset["placement"] != "end"]
     after = [figure_markup(asset, href) for asset, href in asset_hrefs if asset["placement"] == "end"]
@@ -737,11 +738,19 @@ def semantic_body_parts(
                 note_hrefs,
             )
         )
-        if before and not inserted_before and block["kind"] == "heading":
+        if (
+            before
+            and not inserted_before
+            and not assets_after_content
+            and block["kind"] == "heading"
+        ):
             parts.extend(before)
             inserted_before = True
     if before and not inserted_before:
-        parts = [*before, *parts]
+        if assets_after_content:
+            parts.extend(before)
+        else:
+            parts = [*before, *parts]
     parts.extend(after)
     expected_revision_ids = {
         str(change.get("id"))
@@ -770,6 +779,7 @@ def document_markup(
         return source_cover_markup(document, language, asset_hrefs)
     layout_blocks = document.get("_layout_blocks")
     if isinstance(layout_blocks, list):
+        is_title_page = document.get("kind") == "cover"
         body_parts = semantic_body_parts(
             layout_blocks,
             book_root,
@@ -778,8 +788,13 @@ def document_markup(
             global_note_ids,
             note_hrefs,
             global_reference_targets,
+            assets_after_content=is_title_page,
         )
-        section_class = ' class="semantic-layout"'
+        section_class = (
+            ' class="semantic-layout title-page"'
+            if is_title_page
+            else ' class="semantic-layout"'
+        )
     else:
         text = document["_text_path"].read_text(encoding="utf-8")
         heading, paragraphs = paragraphs_from_text(text, str(document["title"]))
@@ -862,7 +877,7 @@ def nav_markup(
             "</head>",
             "<body>",
             '  <nav epub:type="toc" id="toc">',
-            f"    <h1>{escape(title)}</h1>",
+            "    <h1>Sumário</h1>",
             "    <ol>",
             *items,
             "    </ol>",

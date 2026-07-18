@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 
-from export_epub import note_reference_markup, semantic_body_parts
+from epub_presentation import default_visual_profile, profile_stylesheet
+from export_epub import nav_markup, note_reference_markup, semantic_body_parts
 
 
 def block(kind: str, start_line: int, end_line: int, **extra: object) -> dict:
@@ -168,6 +169,59 @@ def test_revised_semantic_note_text_preserves_reference_and_backlink() -> None:
     assert '<sup><a epub:type="backlink" href="#noteref-note-2">2</a></sup> Nota revisada.' in parts
 
 
+def test_dialogue_and_verse_styles_use_requested_alignment() -> None:
+    legacy_css = profile_stylesheet(None)
+    antique_css = profile_stylesheet(default_visual_profile())
+
+    assert (
+        ".dialogue { margin-left: 16%; text-align: right; "
+        "text-indent: 0; font-style: italic; }"
+    ) in legacy_css
+    assert (
+        ".semantic-layout .dialogue { margin-left: 16%; text-align: right; "
+        "text-indent: 0; font-style: italic; }"
+    ) in antique_css
+    assert ".verse { margin: 1.35rem auto; max-width: 100%; text-align: center; }" in legacy_css
+    assert ".verse { margin: 1.55rem auto; max-width: 100%; text-align: center; }" in antique_css
+
+
+def test_title_page_assets_follow_content_and_nav_is_named_sumario() -> None:
+    with tempfile.TemporaryDirectory(prefix="epub-title-page-") as raw_root:
+        book_root = Path(raw_root)
+        page = book_root / "text" / "source" / "pages" / "page-0001.txt"
+        page.parent.mkdir(parents=True)
+        page.write_text("TÍTULO\nAutor\n", encoding="utf-8")
+        parts = semantic_body_parts(
+            [
+                block("heading", 1, 1, level=2),
+                block("paragraph", 2, 2),
+            ],
+            book_root,
+            [
+                (
+                    {
+                        "placement": "after_title",
+                        "role": "illustration",
+                        "alt_text": "Retrato",
+                    },
+                    "../images/retrato.jpg",
+                )
+            ],
+            assets_after_content=True,
+        )
+    joined = "\n".join(parts)
+    assert joined.index("Autor") < joined.index("<figure")
+
+    nav = nav_markup(
+        "Título do Livro",
+        "pt-BR",
+        [({"kind": "chapter", "title": "Capítulo"}, "text/capitulo.xhtml")],
+        None,
+    )
+    assert "<h1>Sumário</h1>" in nav
+    assert "Lista de Quadros" not in nav
+
+
 def run_tests() -> None:
     test_note_reference_markup_links_only_attached_markers()
     test_attached_symbol_after_punctuation_is_linked()
@@ -175,6 +229,8 @@ def run_tests() -> None:
     test_cross_document_reference_and_backlink_targets()
     test_semantic_blocks_emit_bidirectional_note_links_without_flattening_layout()
     test_revised_semantic_note_text_preserves_reference_and_backlink()
+    test_dialogue_and_verse_styles_use_requested_alignment()
+    test_title_page_assets_follow_content_and_nav_is_named_sumario()
 
 
 if __name__ == "__main__":

@@ -110,8 +110,14 @@ def profile_stylesheet(profile: dict | None) -> str:
                 ".legacy-layout p:first-of-type { text-indent: 0; }",
                 ".source-heading { margin: 2rem 0 1.35rem; text-align: center; font-weight: 700; }",
                 ".heading-line, .verse-line { display: block; }",
-                ".dialogue { margin-left: 1.4rem; text-align: left; text-indent: -1.4rem; }",
-                ".verse { display: table; margin: 1.35rem auto; max-width: 100%; text-align: left; }",
+                ".dialogue { margin-left: 16%; text-align: right; text-indent: 0; font-style: italic; }",
+                ".verse { margin: 1.35rem auto; max-width: 100%; text-align: center; }",
+                "nav#toc ol { margin: 0; padding-left: 1.5rem; }",
+                "nav#toc li { margin: 0.2rem 0; }",
+                ".title-page { padding-top: 8vh; text-align: center; }",
+                ".title-page .source-heading { margin: 1.4rem 0 1rem; text-align: center; }",
+                ".title-page p { margin: 0.8rem 0; text-align: center; text-indent: 0; }",
+                ".title-page .illustration { break-before: page; page-break-before: always; }",
                 ".illustration { margin: 1.5rem auto; max-width: 32rem; text-align: center; }",
                 ".illustration img { display: block; width: auto; max-width: 100%; height: auto; margin: 0 auto; }",
             ]
@@ -146,8 +152,14 @@ def profile_stylesheet(profile: dict | None) -> str:
             "em, i { color: inherit; }",
             ".source-heading { margin: 2.4rem 0 1.55rem; color: var(--heading-color); text-align: center; font-weight: 400; }",
             ".source-heading .heading-line, .verse-line { display: block; }",
-                ".semantic-layout .dialogue { margin-left: 1.5rem; text-align: left; text-indent: -1.5rem; }",
-                ".verse { display: table; margin: 1.55rem auto; max-width: 100%; text-align: left; }",
+                ".semantic-layout .dialogue { margin-left: 16%; text-align: right; text-indent: 0; font-style: italic; }",
+                ".verse { margin: 1.55rem auto; max-width: 100%; text-align: center; }",
+                "nav#toc ol { margin: 0; padding-left: 1.5rem; }",
+                "nav#toc li { margin: 0.2rem 0; }",
+                ".title-page { padding-top: 8vh; text-align: center; }",
+                ".title-page .source-heading { margin: 1.5rem 0 1rem; text-align: center; }",
+                ".title-page p { margin: 0.85rem 0; text-align: center; text-indent: 0; }",
+                ".title-page .illustration { break-before: page; page-break-before: always; }",
                 ".footnote { margin: 1.35rem 0; padding-top: 0.75rem; border-top: 1px solid #000000; }",
                 ".footnote p { font-size: 0.9em; text-align: left; text-indent: 0; }",
                 ".illustration { margin: 1.75rem auto; max-width: 32rem; text-align: center; }",
@@ -249,7 +261,7 @@ def cover_alt_text(book: dict) -> str:
     return f"Capa editorial: {title}" + (f", por {author}." if author else ".")
 
 
-def cover_image(book: dict) -> bytes:
+def cover_image(book: dict, format_label: str = "EPUB") -> bytes:
     title = normalized_text(book.get("title"))
     if not title:
         raise RuntimeError("antique-paper editorial cover requires a non-empty book title")
@@ -266,7 +278,10 @@ def cover_image(book: dict) -> bytes:
     label_font = image_font.truetype(str(regular_path), size=38)
 
     top = 170
-    label = "EDICAO EPUB"
+    normalized_label = normalized_text(format_label).upper()
+    if not normalized_label or len(normalized_label) > 24:
+        raise RuntimeError("editorial cover format label must contain 1 to 24 characters")
+    label = f"EDICAO {normalized_label}"
     label_bounds = draw.textbbox((0, 0), label, font=label_font)
     draw.text(
         ((width - (label_bounds[2] - label_bounds[0])) / 2, top),
