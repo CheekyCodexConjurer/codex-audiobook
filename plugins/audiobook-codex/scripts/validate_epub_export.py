@@ -22,12 +22,58 @@ from export_epub import (
     IMAGE_EDITIONS,
     TEXT_EDITIONS,
     _layout_text_values,
+    join_semantic_values,
     load_export_context,
     paragraphs_from_text,
+    published_documents,
+    reader_documents,
     safe_segment,
+    semantic_block_groups,
     sha256_file,
     validate_documents,
 )
+
+
+class EpubArchiveCache:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._archive = zipfile.ZipFile(path)
+        self._entries: list[zipfile.ZipInfo] | None = None
+        self._names: set[str] | None = None
+        self._bytes: dict[str, bytes] = {}
+        self._xml: dict[str, ET.Element] = {}
+
+    def close(self) -> None:
+        self._archive.close()
+
+    def __enter__(self) -> "EpubArchiveCache":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        self.close()
+
+    def infolist(self) -> list[zipfile.ZipInfo]:
+        if self._entries is None:
+            self._entries = self._archive.infolist()
+        return self._entries
+
+    def namelist(self) -> list[str]:
+        return [entry.filename for entry in self.infolist()]
+
+    def has_entry(self, name: str) -> bool:
+        if self._names is None:
+            self._names = set(self.namelist())
+        return name in self._names
+
+    def read(self, name: str) -> bytes:
+        if name not in self._bytes:
+            self._bytes[name] = self._archive.read(name)
+        return self._bytes[name]
+
+    def read_xml(self, name: str) -> ET.Element:
+        if name not in self._xml:
+            self._xml[name] = ET.fromstring(self.read(name))
+        return self._xml[name]
 
 
 def normalized_archive_path(base: str, href: str) -> str | None:
@@ -63,175 +109,187 @@ def validate_epub_archive(
     expected_language: str | None,
     semantic_layout: bool,
     expected_spine_ids: list[str],
+    archive: EpubArchiveCache | None = None,
 ) -> list[str]:
     errors: list[str] = []
     if not path.is_file():
         return [f"EPUB is missing: {path}"]
+    if archive is None:
+        try:
+            with EpubArchiveCache(path) as opened_archive:
+                return validate_epub_archive(
+                    path,
+                    visual_profile,
+                    expected_language,
+                    semantic_layout,
+                    expected_spine_ids,
+                    opened_archive,
+                )
+        except zipfile.BadZipFile as error:
+            return [f"EPUB is not a ZIP archive: {error}"]
     try:
-        with zipfile.ZipFile(path) as archive:
-            entries = archive.infolist()
-            if not entries:
-                return ["EPUB archive is empty"]
-            if entries[0].filename != "mimetype":
-                errors.append("EPUB mimetype must be the first archive entry")
-            elif entries[0].compress_type != zipfile.ZIP_STORED:
-                errors.append("EPUB mimetype must be stored without compression")
-            try:
-                if archive.read("mimetype") != b"application/epub+zip":
-                    errors.append("EPUB mimetype is invalid")
-                container = ET.fromstring(archive.read("META-INF/container.xml"))
-                rootfile = next(element for element in container.iter() if local_name(element.tag) == "rootfile")
-                opf_path = rootfile.attrib.get("full-path", "")
-                if not opf_path or opf_path not in archive.namelist():
-                    errors.append("EPUB rootfile is missing")
-                    return errors
-                package = ET.fromstring(archive.read(opf_path))
-            except (KeyError, StopIteration, ET.ParseError) as error:
-                return errors + [f"EPUB package metadata is invalid: {error}"]
-            if expected_language is not None:
-                languages = [
-                    (element.text or "").strip()
-                    for element in package.iter()
-                    if local_name(element.tag) == "language"
-                ]
-                if languages != [expected_language]:
-                    errors.append("EPUB package language does not match the requested text edition")
+        entries = archive.infolist()
+        if not entries:
+            return ["EPUB archive is empty"]
+        if entries[0].filename != "mimetype":
+            errors.append("EPUB mimetype must be the first archive entry")
+        elif entries[0].compress_type != zipfile.ZIP_STORED:
+            errors.append("EPUB mimetype must be stored without compression")
+        try:
+            if archive.read("mimetype") != b"application/epub+zip":
+                errors.append("EPUB mimetype is invalid")
+            container = archive.read_xml("META-INF/container.xml")
+            rootfile = next(element for element in container.iter() if local_name(element.tag) == "rootfile")
+            opf_path = rootfile.attrib.get("full-path", "")
+            if not opf_path or not archive.has_entry(opf_path):
+                errors.append("EPUB rootfile is missing")
+                return errors
+            package = archive.read_xml(opf_path)
+        except (KeyError, StopIteration, ET.ParseError) as error:
+            return errors + [f"EPUB package metadata is invalid: {error}"]
+        if expected_language is not None:
+            languages = [
+                (element.text or "").strip()
+                for element in package.iter()
+                if local_name(element.tag) == "language"
+            ]
+            if languages != [expected_language]:
+                errors.append("EPUB package language does not match the requested text edition")
 
-            opf_parent = PurePosixPath(opf_path).parent.as_posix()
-            manifest_by_id: dict[str, tuple[str, ET.Element]] = {}
-            nav_found = False
-            for item in package.iter():
-                if local_name(item.tag) != "item":
-                    continue
-                item_id = item.attrib.get("id", "")
-                href = item.attrib.get("href", "")
-                archive_path = normalized_archive_path(opf_parent, href)
-                if not item_id or archive_path is None:
-                    errors.append("EPUB manifest has an invalid item")
-                    continue
-                if item_id in manifest_by_id:
-                    errors.append(f"EPUB manifest contains duplicate id: {item_id}")
-                    continue
-                if archive_path not in archive.namelist():
-                    errors.append(f"EPUB manifest path is missing: {archive_path}")
-                manifest_by_id[item_id] = (archive_path, item)
-                if "nav" in item.attrib.get("properties", "").split():
-                    nav_found = True
-                    try:
-                        ET.fromstring(archive.read(archive_path))
-                    except (KeyError, ET.ParseError):
-                        errors.append(f"EPUB nav document is invalid: {archive_path}")
-            if not nav_found:
-                errors.append("EPUB manifest is missing a nav document")
-
-            spine_ids: list[str] = []
-            semantic_documents = 0
-            for itemref in package.iter():
-                if local_name(itemref.tag) != "itemref":
-                    continue
-                item_id = itemref.attrib.get("idref", "")
-                spine_ids.append(item_id)
-                manifest_entry = manifest_by_id.get(item_id)
-                if manifest_entry is None:
-                    errors.append(f"EPUB spine references unknown manifest item: {item_id}")
-                    continue
-                archive_path, item = manifest_entry
-                if item.attrib.get("media-type") == "application/xhtml+xml":
-                    try:
-                        xhtml = archive.read(archive_path)
-                        root = ET.fromstring(xhtml)
-                        if semantic_layout and item_id != "cover-page":
-                            sections = [
-                                element
-                                for element in root.iter()
-                                if local_name(element.tag) == "section"
-                                and "semantic-layout" in element.attrib.get("class", "").split()
-                            ]
-                            if sections:
-                                semantic_documents += 1
-                    except (KeyError, ET.ParseError):
-                        errors.append(f"EPUB spine XHTML is invalid: {archive_path}")
-            if spine_ids != expected_spine_ids:
-                errors.append("EPUB spine does not match the validated document order")
-            if visual_profile:
-                cover_items = [
-                    (item_id, archive_path, item)
-                    for item_id, (archive_path, item) in manifest_by_id.items()
-                    if "cover-image" in item.attrib.get("properties", "").split()
-                ]
-                if len(cover_items) != 1:
-                    errors.append("antique-paper EPUB must contain exactly one cover-image")
-                else:
-                    item_id, archive_path, item = cover_items[0]
-                    if item_id != "editorial-cover":
-                        errors.append("antique-paper cover-image must be editorial-cover")
-                    if archive_path != f"OEBPS/{COVER_IMAGE_PATH}":
-                        errors.append("antique-paper cover image path is invalid")
-                    if item.attrib.get("media-type") != "image/jpeg":
-                        errors.append("antique-paper cover image media type is invalid")
-                    elif archive_path in archive.namelist() and not archive.read(archive_path):
-                        errors.append("antique-paper cover image is empty")
-
-                cover_page = manifest_by_id.get("cover-page")
-                if cover_page is None:
-                    errors.append("antique-paper EPUB is missing the cover page document")
-                else:
-                    archive_path, _ = cover_page
-                    if archive_path != f"OEBPS/{COVER_DOCUMENT_PATH}":
-                        errors.append("antique-paper cover page path is invalid")
-                    if not spine_ids or spine_ids[0] != "cover-page":
-                        errors.append("antique-paper cover page must be first in the spine")
-                    try:
-                        cover_root = ET.fromstring(archive.read(archive_path))
-                        image_sources = [
-                            element.attrib.get("src")
-                            for element in cover_root.iter()
-                            if local_name(element.tag) == "img"
-                        ]
-                        if "../" + COVER_IMAGE_PATH not in image_sources:
-                            errors.append("antique-paper cover page does not reference its cover image")
-                    except (KeyError, ET.ParseError):
-                        errors.append("antique-paper cover page is invalid")
-
-                stylesheet_path = "OEBPS/styles/book.css"
+        opf_parent = PurePosixPath(opf_path).parent.as_posix()
+        manifest_by_id: dict[str, tuple[str, ET.Element]] = {}
+        nav_found = False
+        for item in package.iter():
+            if local_name(item.tag) != "item":
+                continue
+            item_id = item.attrib.get("id", "")
+            href = item.attrib.get("href", "")
+            archive_path = normalized_archive_path(opf_parent, href)
+            if not item_id or archive_path is None:
+                errors.append("EPUB manifest has an invalid item")
+                continue
+            if item_id in manifest_by_id:
+                errors.append(f"EPUB manifest contains duplicate id: {item_id}")
+                continue
+            if not archive.has_entry(archive_path):
+                errors.append(f"EPUB manifest path is missing: {archive_path}")
+            manifest_by_id[item_id] = (archive_path, item)
+            if "nav" in item.attrib.get("properties", "").split():
+                nav_found = True
                 try:
-                    stylesheet = archive.read(stylesheet_path).decode("utf-8")
-                except (KeyError, UnicodeDecodeError):
-                    errors.append("antique-paper stylesheet is missing or invalid")
-                    stylesheet = ""
+                    archive.read_xml(archive_path)
+                except (KeyError, ET.ParseError):
+                    errors.append(f"EPUB nav document is invalid: {archive_path}")
+        if not nav_found:
+            errors.append("EPUB manifest is missing a nav document")
+
+        spine_ids: list[str] = []
+        semantic_documents = 0
+        for itemref in package.iter():
+            if local_name(itemref.tag) != "itemref":
+                continue
+            item_id = itemref.attrib.get("idref", "")
+            spine_ids.append(item_id)
+            manifest_entry = manifest_by_id.get(item_id)
+            if manifest_entry is None:
+                errors.append(f"EPUB spine references unknown manifest item: {item_id}")
+                continue
+            archive_path, item = manifest_entry
+            if item.attrib.get("media-type") == "application/xhtml+xml":
+                try:
+                    root = archive.read_xml(archive_path)
+                    if semantic_layout and item_id != "cover-page":
+                        sections = [
+                            element
+                            for element in root.iter()
+                            if local_name(element.tag) == "section"
+                            and "semantic-layout" in element.attrib.get("class", "").split()
+                        ]
+                        if sections:
+                            semantic_documents += 1
+                except (KeyError, ET.ParseError):
+                    errors.append(f"EPUB spine XHTML is invalid: {archive_path}")
+        if spine_ids != expected_spine_ids:
+            errors.append("EPUB spine does not match the validated document order")
+        if visual_profile:
+            cover_items = [
+                (item_id, archive_path, item)
+                for item_id, (archive_path, item) in manifest_by_id.items()
+                if "cover-image" in item.attrib.get("properties", "").split()
+            ]
+            if len(cover_items) != 1:
+                errors.append("antique-paper EPUB must contain exactly one cover-image")
+            else:
+                item_id, archive_path, item = cover_items[0]
+                if item_id != "editorial-cover":
+                    errors.append("antique-paper cover-image must be editorial-cover")
+                if archive_path != f"OEBPS/{COVER_IMAGE_PATH}":
+                    errors.append("antique-paper cover image path is invalid")
+                if item.attrib.get("media-type") != "image/jpeg":
+                    errors.append("antique-paper cover image media type is invalid")
+                elif archive.has_entry(archive_path) and not archive.read(archive_path):
+                    errors.append("antique-paper cover image is empty")
+
+            cover_page = manifest_by_id.get("cover-page")
+            if cover_page is None:
+                errors.append("antique-paper EPUB is missing the cover page document")
+            else:
+                archive_path, _ = cover_page
+                if archive_path != f"OEBPS/{COVER_DOCUMENT_PATH}":
+                    errors.append("antique-paper cover page path is invalid")
+                if not spine_ids or spine_ids[0] != "cover-page":
+                    errors.append("antique-paper cover page must be first in the spine")
+                try:
+                    cover_root = archive.read_xml(archive_path)
+                    image_sources = [
+                        element.attrib.get("src")
+                        for element in cover_root.iter()
+                        if local_name(element.tag) == "img"
+                    ]
+                    if "../" + COVER_IMAGE_PATH not in image_sources:
+                        errors.append("antique-paper cover page does not reference its cover image")
+                except (KeyError, ET.ParseError):
+                    errors.append("antique-paper cover page is invalid")
+
+            stylesheet_path = "OEBPS/styles/book.css"
+            try:
+                stylesheet = archive.read(stylesheet_path).decode("utf-8")
+            except (KeyError, UnicodeDecodeError):
+                errors.append("antique-paper stylesheet is missing or invalid")
+                stylesheet = ""
+            for marker in (
+                f"--page-background: {PAGE_BACKGROUND};",
+                f'font-family: "{FONT_FAMILY}";',
+                '../fonts/IMFeENrm28P.ttf',
+                '../fonts/IMFeENit28P.ttf',
+            ):
+                if marker not in stylesheet:
+                    errors.append(f"antique-paper stylesheet is missing {marker}")
+            if semantic_layout:
                 for marker in (
-                    f"--page-background: {PAGE_BACKGROUND};",
-                    f'font-family: "{FONT_FAMILY}";',
-                    '../fonts/IMFeENrm28P.ttf',
-                    '../fonts/IMFeENit28P.ttf',
+                    "--text-primary: #000000;",
+                    ".semantic-layout .dialogue",
+                    ".verse {",
+                    "max-width: 32rem;",
                 ):
                     if marker not in stylesheet:
-                        errors.append(f"antique-paper stylesheet is missing {marker}")
-                if semantic_layout:
-                    for marker in (
-                        "--text-primary: #000000;",
-                        ".semantic-layout .dialogue",
-                        ".verse {",
-                        "max-width: 32rem;",
-                    ):
-                        if marker not in stylesheet:
-                            errors.append(f"semantic EPUB stylesheet is missing {marker}")
-                    if semantic_documents == 0:
-                        errors.append("semantic EPUB contains no semantic-layout document")
+                        errors.append(f"semantic EPUB stylesheet is missing {marker}")
+                if semantic_documents == 0:
+                    errors.append("semantic EPUB contains no semantic-layout document")
 
-                for resource in profile_resources(visual_profile):
-                    manifest_entry = manifest_by_id.get(resource.identifier)
-                    if manifest_entry is None:
-                        errors.append(f"antique-paper EPUB is missing resource: {resource.identifier}")
-                        continue
-                    archive_path, item = manifest_entry
-                    if archive_path != f"OEBPS/{resource.epub_path}":
-                        errors.append(f"antique-paper resource path is invalid: {resource.identifier}")
-                    if item.attrib.get("media-type") != resource.media_type:
-                        errors.append(f"antique-paper resource media type is invalid: {resource.identifier}")
-                    if archive_path in archive.namelist():
-                        if sha256_bytes(archive.read(archive_path)) != resource.sha256:
-                            errors.append(f"antique-paper resource hash does not match: {resource.identifier}")
+            for resource in profile_resources(visual_profile):
+                manifest_entry = manifest_by_id.get(resource.identifier)
+                if manifest_entry is None:
+                    errors.append(f"antique-paper EPUB is missing resource: {resource.identifier}")
+                    continue
+                archive_path, item = manifest_entry
+                if archive_path != f"OEBPS/{resource.epub_path}":
+                    errors.append(f"antique-paper resource path is invalid: {resource.identifier}")
+                if item.attrib.get("media-type") != resource.media_type:
+                    errors.append(f"antique-paper resource media type is invalid: {resource.identifier}")
+                if archive.has_entry(archive_path):
+                    if sha256_bytes(archive.read(archive_path)) != resource.sha256:
+                        errors.append(f"antique-paper resource hash does not match: {resource.identifier}")
     except zipfile.BadZipFile as error:
         return [f"EPUB is not a ZIP archive: {error}"]
     return errors
@@ -241,65 +299,100 @@ def validate_epub_document_texts(
     epub_path: Path,
     book_root: Path,
     documents: list[dict],
+    text_edition: str | EpubArchiveCache = "original",
+    archive: EpubArchiveCache | None = None,
 ) -> list[str]:
+    # Preserve the former fourth-positional ``archive`` call shape for direct
+    # validation users while allowing the requested text edition to filter fluid
+    # supplementary documents.
+    if not isinstance(text_edition, str):
+        if archive is not None:
+            raise RuntimeError("EPUB archive was supplied twice")
+        archive = text_edition
+        text_edition = "original"
     if not epub_path.is_file():
         return []
+    if archive is None:
+        try:
+            with EpubArchiveCache(epub_path) as opened_archive:
+                return validate_epub_document_texts(
+                    epub_path,
+                    book_root,
+                    documents,
+                    text_edition,
+                    opened_archive,
+                )
+        except zipfile.BadZipFile as error:
+            return [f"EPUB is not a ZIP archive: {error}"]
     errors: list[str] = []
     try:
-        with zipfile.ZipFile(epub_path) as archive:
-            for index, document in enumerate(documents, start=1):
-                if document.get("kind") == "source_cover":
-                    continue
-                archive_path = (
-                    "OEBPS/text/"
-                    f"{index:03d}-{safe_segment(str(document['id']), f'document-{index:03d}')}.xhtml"
-                )
-                try:
-                    root = ET.fromstring(archive.read(archive_path))
-                except (KeyError, ET.ParseError) as error:
-                    errors.append(f"EPUB document is unreadable: {archive_path}: {error}")
-                    continue
-                section = next(
-                    (element for element in root.iter() if local_name(element.tag) == "section"),
-                    None,
-                )
-                if section is None:
-                    errors.append(f"EPUB document is missing its semantic section: {archive_path}")
-                    continue
-                layout_blocks = document.get("_layout_blocks")
-                if isinstance(layout_blocks, list):
-                    revision_changes = document.get("_revision_changes")
-                    if not isinstance(revision_changes, list):
-                        revision_changes = []
-                    expected = normalized_text(
-                        " ".join(
-                            value
-                            for block in layout_blocks
-                            if isinstance(block, dict)
-                            for value in _layout_text_values(
-                                block,
-                                book_root,
-                                revision_changes,
-                            )
+        for index, document in enumerate(
+            reader_documents(documents, text_edition, book_root),
+            start=1,
+        ):
+            if document.get("kind") == "source_cover":
+                continue
+            archive_path = (
+                "OEBPS/text/"
+                f"{index:03d}-{safe_segment(str(document['id']), f'document-{index:03d}')}.xhtml"
+            )
+            try:
+                root = archive.read_xml(archive_path)
+            except (KeyError, ET.ParseError) as error:
+                errors.append(f"EPUB document is unreadable: {archive_path}: {error}")
+                continue
+            section = next(
+                (element for element in root.iter() if local_name(element.tag) == "section"),
+                None,
+            )
+            if section is None:
+                errors.append(f"EPUB document is missing its semantic section: {archive_path}")
+                continue
+            layout_blocks = document.get("_layout_blocks")
+            if isinstance(layout_blocks, list):
+                revision_changes = document.get("_revision_changes")
+                if not isinstance(revision_changes, list):
+                    revision_changes = []
+                expected = normalized_text(
+                    " ".join(
+                        join_semantic_values(
+                            [
+                                value
+                                for block in block_group
+                                for value in _layout_text_values(
+                                    block,
+                                    book_root,
+                                    revision_changes,
+                                )
+                            ]
+                        )
+                        for _block_index, block_group in semantic_block_groups(
+                            [
+                                block
+                                for block in layout_blocks
+                                if isinstance(block, dict)
+                            ]
                         )
                     )
-                else:
-                    text_path = document.get("_text_path")
-                    if not isinstance(text_path, Path) or not text_path.is_file():
-                        errors.append(f"EPUB document has no validated text input: {archive_path}")
-                        continue
-                    heading, paragraphs = paragraphs_from_text(
-                        text_path.read_text(encoding="utf-8"),
-                        str(document["title"]),
-                    )
-                    expected = normalized_text(" ".join([heading, *paragraphs]))
-                actual = normalized_text(
-                    " ".join([section.text or "", *(element_text(child) for child in section)])
                 )
-                if actual != expected:
-                    errors.append(
-                        f"EPUB document text does not match its validated input: {archive_path}"
-                    )
+            else:
+                text_path = document.get("_text_path")
+                if not isinstance(text_path, Path) or not text_path.is_file():
+                    errors.append(f"EPUB document has no validated text input: {archive_path}")
+                    continue
+                heading, paragraphs = paragraphs_from_text(
+                    text_path.read_text(encoding="utf-8"),
+                    str(document["title"]),
+                    allow_leading_chapter_label=document.get("kind") == "chapter",
+                )
+                expected = normalized_text(" ".join([heading, *paragraphs]))
+            actual = normalized_text(
+                " ".join([section.text or "", *(element_text(child) for child in section)])
+            )
+            if actual != expected:
+                errors.append(
+                    f"EPUB document text does not match its validated input: {archive_path}"
+                )
     except zipfile.BadZipFile as error:
         return [f"EPUB is not a ZIP archive: {error}"]
     return errors
@@ -322,6 +415,8 @@ def validate_export_inputs(
             _,
             translation_ledger,
             revision_ledger,
+            _fluid_style,
+            fluid_ledger,
             layout,
         ) = load_export_context(
             book_root,
@@ -338,6 +433,7 @@ def validate_export_inputs(
             text_edition,
             translation_ledger,
             revision_ledger,
+            fluid_ledger,
             layout,
         )
         if image_edition == "approved-restored":
@@ -364,6 +460,7 @@ def validate_export_sidecar(
     text_edition: str,
     epub_manifest: dict,
     visual_profile: dict | None,
+    archive: EpubArchiveCache | None = None,
 ) -> list[str]:
     sidecar = epub_path.with_suffix(".epub.json")
     if not sidecar.is_file():
@@ -404,6 +501,30 @@ def validate_export_sidecar(
             "revision_ledger_sha256"
         ):
             errors.append("EPUB export sidecar revision ledger hash does not match manifest")
+    elif text_edition == "fluid-pt-br":
+        for key in (
+            "base_edition",
+            "base_ledger_sha256",
+            "fluid_style_sha256",
+            "fluid_edition_ledger_sha256",
+            "profile",
+        ):
+            if data.get(key) != epub_manifest.get(key):
+                errors.append(
+                    f"EPUB export sidecar {key} does not match fluid manifest"
+                )
+        if epub_manifest.get("base_edition") == "translated-pt-br":
+            if data.get("source_language") != epub_manifest.get("source_language"):
+                errors.append(
+                    "EPUB export sidecar source language does not match fluid manifest"
+                )
+            if data.get("translation_ledger_sha256") != epub_manifest.get(
+                "translation_ledger_sha256"
+            ):
+                errors.append(
+                    "EPUB export sidecar translation ledger hash does not match "
+                    "the fluid base"
+                )
     if epub_manifest.get("layout") is not None:
         if data.get("layout") != epub_manifest.get("layout"):
             errors.append("EPUB export sidecar layout does not match manifest")
@@ -423,35 +544,41 @@ def validate_export_sidecar(
         resources = presentation.get("resources")
         if not isinstance(resources, list):
             errors.append("EPUB export sidecar visual resources must be an array")
+        close_archive = False
         try:
-            with zipfile.ZipFile(epub_path) as archive:
-                if isinstance(cover, dict):
-                    cover_path = cover.get("epub_path")
-                    if cover_path != f"OEBPS/{COVER_IMAGE_PATH}":
-                        errors.append("EPUB export sidecar visual cover path is invalid")
-                    elif cover_path not in archive.namelist():
-                        errors.append("EPUB export sidecar visual cover is missing from EPUB")
-                    elif cover.get("sha256") != sha256_bytes(archive.read(cover_path)):
-                        errors.append("EPUB export sidecar visual cover hash does not match EPUB")
-                entries_by_id = {
-                    entry.get("id"): entry
-                    for entry in resources
-                    if isinstance(entry, dict) and isinstance(entry.get("id"), str)
-                } if isinstance(resources, list) else {}
-                for resource in profile_resources(visual_profile):
-                    entry = entries_by_id.get(resource.identifier)
-                    if not isinstance(entry, dict):
-                        errors.append(f"EPUB export sidecar is missing resource: {resource.identifier}")
-                        continue
-                    expected_path = f"OEBPS/{resource.epub_path}"
-                    if entry.get("epub_path") != expected_path:
-                        errors.append(f"EPUB export sidecar resource path is invalid: {resource.identifier}")
-                    if entry.get("media_type") != resource.media_type:
-                        errors.append(f"EPUB export sidecar resource media type is invalid: {resource.identifier}")
-                    if entry.get("sha256") != resource.sha256:
-                        errors.append(f"EPUB export sidecar resource hash is invalid: {resource.identifier}")
+            if archive is None:
+                archive = EpubArchiveCache(epub_path)
+                close_archive = True
+            if isinstance(cover, dict):
+                cover_path = cover.get("epub_path")
+                if cover_path != f"OEBPS/{COVER_IMAGE_PATH}":
+                    errors.append("EPUB export sidecar visual cover path is invalid")
+                elif not archive.has_entry(cover_path):
+                    errors.append("EPUB export sidecar visual cover is missing from EPUB")
+                elif cover.get("sha256") != sha256_bytes(archive.read(cover_path)):
+                    errors.append("EPUB export sidecar visual cover hash does not match EPUB")
+            entries_by_id = {
+                entry.get("id"): entry
+                for entry in resources
+                if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+            } if isinstance(resources, list) else {}
+            for resource in profile_resources(visual_profile):
+                entry = entries_by_id.get(resource.identifier)
+                if not isinstance(entry, dict):
+                    errors.append(f"EPUB export sidecar is missing resource: {resource.identifier}")
+                    continue
+                expected_path = f"OEBPS/{resource.epub_path}"
+                if entry.get("epub_path") != expected_path:
+                    errors.append(f"EPUB export sidecar resource path is invalid: {resource.identifier}")
+                if entry.get("media_type") != resource.media_type:
+                    errors.append(f"EPUB export sidecar resource media type is invalid: {resource.identifier}")
+                if entry.get("sha256") != resource.sha256:
+                    errors.append(f"EPUB export sidecar resource hash is invalid: {resource.identifier}")
         except zipfile.BadZipFile as error:
             errors.append(f"EPUB export sidecar cannot read EPUB: {error}")
+        finally:
+            if close_archive and archive is not None:
+                archive.close()
     elif data.get("visual_profile") is not None:
         errors.append("EPUB export sidecar visual profile exists without manifest visual_profile")
     return errors
@@ -474,12 +601,16 @@ def main() -> None:
         else book_root
         / "metadata"
         / (
-            "epub-manifest.pt-br.json"
-            if args.text_edition == "translated-pt-br"
+            "epub-manifest.fluid.json"
+            if args.text_edition == "fluid-pt-br"
             else (
-                "epub-manifest.revised.json"
-                if args.text_edition == "revised-pt-br"
-                else "epub-manifest.json"
+                "epub-manifest.pt-br.json"
+                if args.text_edition == "translated-pt-br"
+                else (
+                    "epub-manifest.revised.json"
+                    if args.text_edition == "revised-pt-br"
+                    else "epub-manifest.json"
+                )
             )
         )
     )
@@ -505,25 +636,50 @@ def main() -> None:
     expected_spine_ids = ["cover-page"] if visual_profile else []
     if isinstance(documents, list):
         expected_spine_ids.extend(
-            f"doc-{index}" for index in range(1, len(documents) + 1)
+            f"doc-{index}"
+            for index in range(
+                1,
+                len(published_documents(documents, args.text_edition)) + 1,
+            )
         )
-    errors += validate_epub_archive(
-        epub_path,
-        visual_profile,
-        expected_language,
-        semantic_layout,
-        expected_spine_ids,
-    )
-    if isinstance(documents, list):
-        errors += validate_epub_document_texts(epub_path, book_root, documents)
-    if epub_path.is_file() and isinstance(manifest_data, dict):
-        errors += validate_export_sidecar(
-            book_root,
+    if epub_path.is_file():
+        try:
+            with EpubArchiveCache(epub_path) as archive:
+                errors += validate_epub_archive(
+                    epub_path,
+                    visual_profile,
+                    expected_language,
+                    semantic_layout,
+                    expected_spine_ids,
+                    archive,
+                )
+                if isinstance(documents, list):
+                    errors += validate_epub_document_texts(
+                        epub_path,
+                        book_root,
+                        documents,
+                        args.text_edition,
+                        archive,
+                    )
+                if isinstance(manifest_data, dict):
+                    errors += validate_export_sidecar(
+                        book_root,
+                        epub_path,
+                        args.image_edition,
+                        args.text_edition,
+                        manifest_data,
+                        visual_profile,
+                        archive,
+                    )
+        except zipfile.BadZipFile as error:
+            errors.append(f"EPUB is not a ZIP archive: {error}")
+    else:
+        errors += validate_epub_archive(
             epub_path,
-            args.image_edition,
-            args.text_edition,
-            manifest_data,
             visual_profile,
+            expected_language,
+            semantic_layout,
+            expected_spine_ids,
         )
     if errors:
         print("INVALID EPUB export:", file=sys.stderr)

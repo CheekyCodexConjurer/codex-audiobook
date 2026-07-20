@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
+import copy
 from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import wave
@@ -15,10 +19,15 @@ import wave
 os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
-from book_layout import resolve_book_paths
+from book_layout import is_reparse_point, resolve_book_paths
 from chatterbox_text import DEFAULT_MAX_CHARS, prepare_chatterbox_segments
-from chapter_audio import assemble_chapters, chapter_specs
+from chapter_audio import (
+    assemble_full_book_master,
+    assemble_one_chapter,
+    chapter_specs,
+)
 from narration_plan import load_plan_segments, read_json as read_narration_plan
+from publication_selection import require_narrator_base
 from audio_tools import (
     CHANNELS,
     DEFAULT_PUBLICATION_TEMPO,
@@ -38,10 +47,10 @@ from validate_narration_plan import validate_plan
 
 
 DEFAULT_MODEL_ROOT = Path(r"E:\Pessoal\tts\chatterbox-multilingual-v3\models")
-DEFAULT_REFERENCE_VOICE = (
+FEMININA_REFERENCE_VOICE = (
     Path(__file__).resolve().parent.parent / "assets" / "voices" / "Feminina.mp3"
 )
-DEFAULT_REFERENCE_VOICE_SHA256 = "20d890c2a97bc2dd97b4ea4021e83681c00830c7b2e8894f944776e44eacde9f"
+FEMININA_REFERENCE_VOICE_SHA256 = "20d890c2a97bc2dd97b4ea4021e83681c00830c7b2e8894f944776e44eacde9f"
 MASCULINA_REFERENCE_VOICE = (
     Path(__file__).resolve().parent.parent / "assets" / "voices" / "Masculina.mp3"
 )
@@ -108,8 +117,8 @@ PER_SEGMENT_INDEX_SEED_STRATEGY = "per-segment-index-v1"
 FIXED_PER_SEGMENT_SEED_STRATEGY = "fixed-per-segment-v1"
 VOICE_PROFILES = {
     FEMININA_PROFILE_NAME: {
-        "reference": DEFAULT_REFERENCE_VOICE,
-        "reference_sha256": DEFAULT_REFERENCE_VOICE_SHA256,
+        "reference": FEMININA_REFERENCE_VOICE,
+        "reference_sha256": FEMININA_REFERENCE_VOICE_SHA256,
         "parameters": FEMININA_PROFILE,
         "calibration": FEMININA_PROFILE_CALIBRATION,
         "conditioning_strategy": PRECOMPUTED_CONDITIONALS_STRATEGY,
@@ -124,15 +133,33 @@ VOICE_PROFILES = {
         "seed_strategy": FIXED_PER_SEGMENT_SEED_STRATEGY,
     },
 }
+DEFAULT_VOICE_PROFILE_NAME = MASCULINA_PROFILE_NAME
+DEFAULT_VOICE_PROFILE = VOICE_PROFILES[DEFAULT_VOICE_PROFILE_NAME]
+DEFAULT_REFERENCE_VOICE = DEFAULT_VOICE_PROFILE["reference"]
+DEFAULT_REFERENCE_VOICE_SHA256 = DEFAULT_VOICE_PROFILE["reference_sha256"]
 RENDER_JOURNAL_SCHEMA_VERSION = "2.0"
 RENDER_SEED_STRATEGY = PER_SEGMENT_INDEX_SEED_STRATEGY
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_SEED_STEP = 1_000_003
 EXPECTED_WAV_PARAMS = (CHANNELS, SAMPLE_WIDTH, SAMPLE_RATE)
+RENDER_JOURNAL_RECORD_SCHEMA_VERSION = "1.0"
+MAX_PENDING_CHAPTER_ASSEMBLIES = 2
+RENDER_JOURNAL_RECORD_NAME = re.compile(r"^segment-(\d{4,})\.json$")
 
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def sha256_json(value: object) -> str:
+    return sha256_bytes(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
 
 
 def sha256_file(path: Path) -> str:
@@ -170,6 +197,140 @@ def read_json(path: Path, label: str) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise RuntimeError(f"Cannot read {label} {path}: {error}") from error
+
+
+def render_journal_records_directory(journal_path: Path) -> Path:
+    return journal_path.with_name(f"{journal_path.stem}.records")
+
+
+def render_journal_identity_sha256(journal: dict) -> str:
+    identity = journal.get("segment_render_identity")
+    if not isinstance(identity, dict):
+        raise RuntimeError("Audio render journal has no valid segment render identity.")
+    return sha256_json(identity)
+
+
+def render_journal_record_path(journal_path: Path, index: int) -> Path:
+    if index <= 0:
+        raise RuntimeError("Audio render journal record index must be positive.")
+    directory = render_journal_records_directory(journal_path)
+    if os.path.lexists(directory) and is_reparse_point(directory):
+        raise RuntimeError(
+            f"Audio render journal records directory must not be a reparse point: {directory}"
+        )
+    return directory / f"segment-{index:04d}.json"
+
+
+def write_render_journal_record(
+    journal_path: Path,
+    journal: dict,
+    record: dict,
+) -> None:
+    index = record.get("index")
+    if not isinstance(index, int) or isinstance(index, bool) or index <= 0:
+        raise RuntimeError("Audio render journal record index is invalid.")
+    write_json(
+        render_journal_record_path(journal_path, index),
+        {
+            "schema_version": RENDER_JOURNAL_RECORD_SCHEMA_VERSION,
+            "segment_render_identity_sha256": render_journal_identity_sha256(journal),
+            "record": record,
+        },
+    )
+
+
+def load_render_journal_records(
+    journal_path: Path,
+    journal: dict,
+    canonical_records: dict[int, dict] | None = None,
+) -> dict[int, dict]:
+    directory = render_journal_records_directory(journal_path)
+    if not directory.exists():
+        return {}
+    if is_reparse_point(directory) or not directory.is_dir():
+        raise RuntimeError(f"Audio render journal records path is not a directory: {directory}")
+    expected_identity = render_journal_identity_sha256(journal)
+    records: dict[int, dict] = {}
+    for path in sorted(directory.iterdir(), key=lambda candidate: candidate.name):
+        if path.name.startswith("."):
+            continue
+        match = RENDER_JOURNAL_RECORD_NAME.fullmatch(path.name)
+        if match is None or is_reparse_point(path) or not path.is_file():
+            raise RuntimeError(f"Audio render journal records directory contains an invalid entry: {path}")
+        envelope = read_json(path, "audio render journal segment record")
+        if not isinstance(envelope, dict):
+            raise RuntimeError(f"Audio render journal segment record must be an object: {path}")
+        if envelope.get("schema_version") != RENDER_JOURNAL_RECORD_SCHEMA_VERSION:
+            raise RuntimeError(f"Audio render journal segment record has an unsupported schema: {path}")
+        record = envelope.get("record")
+        index = record.get("index") if isinstance(record, dict) else None
+        filename_index = int(match.group(1))
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or index <= 0
+            or index != filename_index
+            or index in records
+        ):
+            raise RuntimeError(f"Audio render journal segment record index is invalid: {path}")
+        if envelope.get("segment_render_identity_sha256") != expected_identity:
+            if canonical_records is not None and canonical_records.get(index) == record:
+                continue
+            raise RuntimeError(f"Audio render journal segment record identity does not match: {path}")
+        records[index] = record
+    return records
+
+
+def clear_render_journal_records(journal_path: Path) -> None:
+    directory = render_journal_records_directory(journal_path)
+    if not directory.exists():
+        return
+    if is_reparse_point(directory) or not directory.is_dir():
+        raise RuntimeError(f"Audio render journal records path is not a directory: {directory}")
+    for path in list(directory.iterdir()):
+        if path.name.startswith("."):
+            if not is_reparse_point(path) and path.is_file():
+                path.unlink()
+                continue
+            raise RuntimeError(f"Audio render journal records directory contains an invalid entry: {path}")
+        if (
+            RENDER_JOURNAL_RECORD_NAME.fullmatch(path.name) is None
+            or is_reparse_point(path)
+            or not path.is_file()
+        ):
+            raise RuntimeError(f"Audio render journal records directory contains an invalid entry: {path}")
+        path.unlink()
+    directory.rmdir()
+
+
+def render_journal_snapshot(journal: dict, records: dict[int, dict]) -> dict:
+    snapshot = copy.deepcopy(journal)
+    snapshot["segments"] = [
+        copy.deepcopy(records[index])
+        for index in sorted(records)
+    ]
+    return snapshot
+
+
+def journal_records_for_current_render(
+    previous_records: dict[int, dict],
+    all_segments: list[NarratorSegment],
+    full_book_render: bool,
+) -> dict[int, dict]:
+    """Keep only active records in a complete-book journal snapshot.
+
+    Retain all records for selective chapter work, where unselected chapters must
+    remain resumable. A full-book plan is authoritative and must not carry stale
+    entries from an earlier reflow.
+    """
+    if not full_book_render:
+        return dict(previous_records)
+    active_indexes = {segment.line_number for segment in all_segments}
+    return {
+        index: record
+        for index, record in previous_records.items()
+        if index in active_indexes
+    }
 
 
 def render_identity(
@@ -282,6 +443,11 @@ def load_render_journal(
         if index <= 0 or index in by_index:
             raise RuntimeError(f"Audio render journal has duplicate or invalid segment indexes: {path}")
         by_index[index] = record
+    by_index.update(load_render_journal_records(path, journal, by_index))
+    journal["segments"] = [
+        by_index[index]
+        for index in sorted(by_index)
+    ]
     return journal, by_index
 
 
@@ -380,9 +546,24 @@ def segment_record(
     output_dir: Path,
     seed: int | None,
     render_attempts: list[dict] | None = None,
+    audio_details: dict | None = None,
 ) -> dict:
-    duration, audio_sha256 = wav_details(segment_path)
-    speech = validate_speech_wav(segment_path)
+    if audio_details is None:
+        duration, audio_sha256 = wav_details(segment_path)
+        speech = validate_speech_wav(segment_path)
+    else:
+        duration = audio_details.get("duration_seconds")
+        audio_sha256 = audio_details.get("audio_sha256")
+        speech = audio_details.get("speech")
+        if (
+            isinstance(duration, bool)
+            or not isinstance(duration, (int, float))
+            or duration <= 0
+            or not isinstance(audio_sha256, str)
+            or len(audio_sha256) != 64
+            or not isinstance(speech, dict)
+        ):
+            raise RuntimeError("Freshly rendered segment audio details are invalid.")
     record = {
         "index": index,
         "semantic_id": getattr(segment, "semantic_id", None)
@@ -393,7 +574,7 @@ def segment_record(
         "warnings": list(segment.warnings),
         "path": segment_path.relative_to(output_dir).as_posix(),
         "audio_sha256": audio_sha256,
-        "duration_seconds": round(duration, 3),
+        "duration_seconds": round(float(duration), 3),
         "speech": speech,
         "seed": seed,
     }
@@ -599,7 +780,7 @@ def render_segment_atomically(
     repetition_penalty: float,
     min_p: float,
     top_p: float,
-) -> dict[str, float]:
+) -> dict:
     temporary = target.with_name(f".{target.stem}.{os.getpid()}.tmp.wav")
     try:
         render_segment(
@@ -615,10 +796,14 @@ def render_segment_atomically(
             min_p,
             top_p,
         )
-        wav_details(temporary)
+        duration, audio_sha256 = wav_details(temporary)
         speech = validate_speech_wav(temporary)
         os.replace(temporary, target)
-        return speech
+        return {
+            "duration_seconds": duration,
+            "audio_sha256": audio_sha256,
+            "speech": speech,
+        }
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -641,7 +826,7 @@ def render_segment_with_retries(
     seed: int | None,
     device: str,
     skip_initial_seed: bool = False,
-) -> tuple[int | None, list[dict]]:
+) -> tuple[int | None, list[dict], dict]:
     attempts: list[dict] = []
     for attempt_offset in range(RENDER_RETRY_ATTEMPTS):
         attempt_number = attempt_offset + 1
@@ -649,7 +834,7 @@ def render_segment_with_retries(
         if not (skip_initial_seed and attempt_offset == 0):
             seed_torch(attempt_seed, device)
         try:
-            speech = render_segment_atomically(
+            audio_details = render_segment_atomically(
                 model,
                 text,
                 target,
@@ -677,10 +862,10 @@ def render_segment_with_retries(
                 "attempt": attempt_number,
                 "seed": attempt_seed,
                 "status": "accepted",
-                "speech": speech,
+                "speech": audio_details["speech"],
             }
         )
-        return attempt_seed, attempts
+        return attempt_seed, attempts, audio_details
     seeds = ", ".join(str(attempt["seed"]) for attempt in attempts)
     last_reason = attempts[-1]["reason"] if attempts else "no attempts were recorded"
     raise RuntimeError(
@@ -730,6 +915,37 @@ def apply_publication_tempo_atomically(
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def await_oldest_chapter_assembly(
+    pending: deque[Future[dict]],
+) -> dict | None:
+    if not pending:
+        return None
+    return pending.popleft().result()
+
+
+def drain_chapter_assemblies(
+    pending: deque[Future[dict]],
+) -> dict | None:
+    latest: dict | None = None
+    while pending:
+        latest = await_oldest_chapter_assembly(pending)
+    return latest
+
+
+def interchapter_pause_seconds(plan: dict) -> list[float]:
+    chapters = chapter_specs(plan)
+    pauses: list[float] = []
+    for chapter in chapters[:-1]:
+        pause_after = chapter.segments[-1].get("pause_after")
+        seconds = pause_after.get("seconds") if isinstance(pause_after, dict) else None
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+            raise RuntimeError(
+                f"Narration plan chapter {chapter.id!r} has an invalid final pause."
+            )
+        pauses.append(float(seconds))
+    return pauses
 
 
 def replacement_journal_path(path: Path) -> Path:
@@ -1239,29 +1455,58 @@ def main() -> None:
         choices=tuple(sorted(VOICE_PROFILES)),
         help=(
             "Use one immutable calibrated voice reference and its complete parameter set. "
+            f"Defaults to {DEFAULT_VOICE_PROFILE_NAME} when no overrides are supplied. "
             "Cannot be combined with individual voice or generation overrides."
         ),
     )
     parser.add_argument("--voice-reference", type=Path, default=DEFAULT_REFERENCE_VOICE)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--format", choices=("wav", "m4a", "mp3"), default="mp3")
-    parser.add_argument("--max-chars", type=int, default=FEMININA_PROFILE["max_chars"])
+    parser.add_argument(
+        "--max-chars",
+        type=int,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["max_chars"],
+    )
     parser.add_argument(
         "--silence-seconds",
         type=float,
-        default=FEMININA_PROFILE["silence_seconds"],
+        default=DEFAULT_VOICE_PROFILE["parameters"]["silence_seconds"],
     )
-    parser.add_argument("--exaggeration", type=float, default=FEMININA_PROFILE["exaggeration"])
-    parser.add_argument("--cfg-weight", type=float, default=FEMININA_PROFILE["cfg_weight"])
-    parser.add_argument("--temperature", type=float, default=FEMININA_PROFILE["temperature"])
+    parser.add_argument(
+        "--exaggeration",
+        type=float,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["exaggeration"],
+    )
+    parser.add_argument(
+        "--cfg-weight",
+        type=float,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["cfg_weight"],
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["temperature"],
+    )
     parser.add_argument(
         "--repetition-penalty",
         type=float,
-        default=FEMININA_PROFILE["repetition_penalty"],
+        default=DEFAULT_VOICE_PROFILE["parameters"]["repetition_penalty"],
     )
-    parser.add_argument("--min-p", type=float, default=FEMININA_PROFILE["min_p"])
-    parser.add_argument("--top-p", type=float, default=FEMININA_PROFILE["top_p"])
-    parser.add_argument("--seed", type=int, default=FEMININA_PROFILE["seed"])
+    parser.add_argument(
+        "--min-p",
+        type=float,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["min_p"],
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["top_p"],
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=DEFAULT_VOICE_PROFILE["parameters"]["seed"],
+    )
     parser.add_argument(
         "--publication-tempo",
         type=float,
@@ -1321,6 +1566,7 @@ def main() -> None:
         raise SystemExit("--remount cannot be combined with --chapters.")
 
     reflow_cache_dir: Path | None = None
+    chapter_executor: ThreadPoolExecutor | None = None
     try:
         input_file = args.input_file.expanduser().resolve()
         output_dir = args.output_dir.expanduser().resolve()
@@ -1374,6 +1620,10 @@ def main() -> None:
                 **(provenance or {}),
                 "path": relative_to(narrator_changes, book_root),
             }
+            base_edition = narrator_lineage.get("base_edition")
+            if not isinstance(base_edition, str):
+                raise RuntimeError("Narrator lineage has no valid base edition.")
+            require_narrator_base(book_root, base_edition)
             narrator_review = (
                 args.narrator_review.expanduser().resolve()
                 if args.narrator_review
@@ -1528,6 +1778,7 @@ def main() -> None:
         if args.overwrite and full_book_render:
             if working_journal_path.exists():
                 working_journal_path.unlink()
+            clear_render_journal_records(working_journal_path)
             journal = new_render_journal(
                 identity,
                 input_file_value,
@@ -1588,7 +1839,11 @@ def main() -> None:
                     f"--remount found an unsupported render seed strategy: {seed_strategy}"
                 )
 
-        journal_records = dict(previous_records)
+        journal_records = journal_records_for_current_render(
+            previous_records,
+            all_segments,
+            full_book_render,
+        )
         if not args.remount:
             journal["status"] = "incomplete"
             journal["input_file"] = input_file_value
@@ -1600,12 +1855,20 @@ def main() -> None:
                 for index in sorted(journal_records)
             ]
             write_json(working_journal_path, journal)
+            clear_render_journal_records(working_journal_path)
 
         model: object | None = None
         segment_paths: list[Path] = []
         segment_records: list[dict] = []
         reused_segments = 0
         rendered_segments = 0
+        pending_chapter_jobs: deque[Future[dict]] = deque()
+        chapter_manifest: dict | None = None
+        if book_root is not None and narration_plan is not None:
+            chapter_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="audiobook-chapter-assembly",
+            )
         reflow_sources: dict[tuple[int, str, tuple[str, ...]], tuple[dict, Path]] = {}
         if not args.remount and previous_records:
             reflow_cache_dir = segments_dir / f".reflow-reuse-{os.getpid()}"
@@ -1626,6 +1889,8 @@ def main() -> None:
             previous = previous_records.get(index)
             reflow_source: tuple[dict, Path] | None = None
             render_attempts: list[dict] | None = None
+            audio_details: dict | None = None
+            reused_record: dict | None = None
             if args.remount:
                 if not isinstance(previous, dict) or "seed" not in previous:
                     raise RuntimeError(
@@ -1647,6 +1912,7 @@ def main() -> None:
                         f"(locutor line {segment.line_number})."
                     )
                 reused_segments += 1
+                reused_record = copy.deepcopy(previous)
             else:
                 seed = segment_seed(args.seed, index, seed_strategy)
                 if not (
@@ -1660,6 +1926,7 @@ def main() -> None:
                     seed,
                 ):
                     reused_segments += 1
+                    reused_record = copy.deepcopy(previous)
                 else:
                     reflow_source = reflow_sources.get(segment_speech_identity(segment))
                     if reflow_source is not None:
@@ -1680,7 +1947,7 @@ def main() -> None:
                                 )
                                 skip_initial_seed = index == 1 and seed == args.seed
                         try:
-                            seed, render_attempts = render_segment_with_retries(
+                            seed, render_attempts, audio_details = render_segment_with_retries(
                                 segment_index=index,
                                 model=model,
                                 text=segment.text,
@@ -1704,13 +1971,18 @@ def main() -> None:
                             ) from error
                         rendered_segments += 1
             segment_paths.append(segment_path)
-            record = segment_record(
-                index,
-                segment,
-                segment_path,
-                output_dir,
-                seed,
-                render_attempts,
+            record = (
+                reused_record
+                if reused_record is not None
+                else segment_record(
+                    index,
+                    segment,
+                    segment_path,
+                    output_dir,
+                    seed,
+                    render_attempts,
+                    audio_details,
+                )
             )
             if not args.remount and reflow_source is not None:
                 record["reused_from"] = reflow_reuse_provenance(
@@ -1719,26 +1991,44 @@ def main() -> None:
                 )
             segment_records.append(record)
             if not args.remount:
-                journal_records[index] = segment_records[-1]
-                journal["segments"] = [
-                    journal_records[journal_index]
-                    for journal_index in sorted(journal_records)
-                ]
-                write_json(working_journal_path, journal)
+                journal_records[index] = record
+                write_render_journal_record(
+                    working_journal_path,
+                    journal,
+                    record,
+                )
             if (
                 book_root is not None
                 and narration_plan is not None
                 and segment.chapter_id is not None
                 and chapter_last_lines[segment.chapter_id] == index
             ):
-                assemble_chapters(
-                    book_root,
-                    output_dir,
-                    narration_plan,
-                    journal,
-                    [segment.chapter_id],
-                    args.publication_tempo,
+                if chapter_executor is None:
+                    raise RuntimeError("Chapter assembly worker was not initialized.")
+                if len(pending_chapter_jobs) >= MAX_PENDING_CHAPTER_ASSEMBLIES:
+                    completed_manifest = await_oldest_chapter_assembly(
+                        pending_chapter_jobs
+                    )
+                    if completed_manifest is not None:
+                        chapter_manifest = completed_manifest
+                pending_chapter_jobs.append(
+                    chapter_executor.submit(
+                        assemble_one_chapter,
+                        book_root,
+                        output_dir,
+                        narration_plan,
+                        render_journal_snapshot(journal, journal_records),
+                        segment.chapter_id,
+                        args.publication_tempo,
+                    )
                 )
+
+        completed_manifest = drain_chapter_assemblies(pending_chapter_jobs)
+        if completed_manifest is not None:
+            chapter_manifest = completed_manifest
+        if chapter_executor is not None:
+            chapter_executor.shutdown(wait=True)
+            chapter_executor = None
 
         if not full_book_render:
             if book_root is None or narration_plan is None:
@@ -1763,6 +2053,7 @@ def main() -> None:
             journal.pop("audio_manifest", None)
             journal.pop("audio_manifest_sha256", None)
             write_json(working_journal_path, journal)
+            clear_render_journal_records(working_journal_path)
             print(
                 f"Rendered {rendered_segments} segment(s), reused {reused_segments} segment(s): "
                 + ", ".join(sorted(selected_chapter_ids))
@@ -1777,13 +2068,33 @@ def main() -> None:
             )
             for segment in segments[:-1]
         ]
-        master_duration = join_wavs_atomically(segment_paths, master_wav, boundary_pauses)
+        if book_root is not None and narration_plan is not None:
+            if chapter_manifest is None:
+                raise RuntimeError("Chapter assembly produced no manifest for full-book mounting.")
+            full_book_assembly = assemble_full_book_master(
+                book_root,
+                output_dir,
+                chapter_manifest,
+                target=master_wav,
+                interchapter_pauses=interchapter_pause_seconds(narration_plan),
+            )
+            master_duration = float(full_book_assembly["master_duration_seconds"])
+            master_wav_sha256 = str(full_book_assembly["master_wav_sha256"])
+        else:
+            master_duration = join_wavs_atomically(
+                segment_paths,
+                master_wav,
+                boundary_pauses,
+            )
+            master_wav_sha256 = sha256_file(master_wav)
         duration = apply_publication_tempo_atomically(
             master_wav,
             final_wav,
             args.publication_tempo,
         )
         transcode_atomically(final_wav, final_audio, args.format)
+        final_wav_sha256 = sha256_file(final_wav)
+        final_audio_sha256 = sha256_file(final_audio)
         if not args.remount:
             expected_paths = set(segment_paths)
             for stale_path in segments_dir.glob("segment-*.wav"):
@@ -1805,20 +2116,20 @@ def main() -> None:
                 "rendered_segments": rendered_segments,
             },
             "master_wav": manifest_path_value(master_wav),
-            "master_wav_sha256": sha256_file(master_wav),
+            "master_wav_sha256": master_wav_sha256,
             "master_duration_seconds": round(master_duration, 3),
             "publication": {
                 "processor": "ffmpeg-atempo-v1",
                 "tempo": args.publication_tempo,
                 "preserves_pitch": True,
                 "wav": manifest_path_value(final_wav),
-                "wav_sha256": sha256_file(final_wav),
+                "wav_sha256": final_wav_sha256,
                 "duration_seconds": round(duration, 3),
             },
             "final_wav": manifest_path_value(final_wav),
-            "final_wav_sha256": sha256_file(final_wav),
+            "final_wav_sha256": final_wav_sha256,
             "final_audio": manifest_path_value(final_audio),
-            "final_audio_sha256": sha256_file(final_audio),
+            "final_audio_sha256": final_audio_sha256,
             "duration_seconds": round(duration, 3),
             "segments": [
                 {
@@ -1880,17 +2191,24 @@ def main() -> None:
         write_json(manifest_path, manifest)
         if not args.remount:
             journal["status"] = "complete"
-            journal["segments"] = segment_records
+            journal["segments"] = [
+                journal_records[index]
+                for index in sorted(journal_records)
+            ]
             journal["assembly_identity"] = current_assembly_identity
             journal["audio_manifest"] = manifest_path_value(manifest_path)
             journal["audio_manifest_sha256"] = sha256_file(manifest_path)
             write_json(working_journal_path, journal)
+            clear_render_journal_records(working_journal_path)
             if working_journal_path != journal_path:
                 os.replace(working_journal_path, journal_path)
+                clear_render_journal_records(journal_path)
     except RuntimeError as error:
         print(f"Cannot render Chatterbox audio: {error}", file=sys.stderr)
         raise SystemExit(1) from error
     finally:
+        if chapter_executor is not None:
+            chapter_executor.shutdown(wait=True)
         if reflow_cache_dir is not None and reflow_cache_dir.exists():
             shutil.rmtree(reflow_cache_dir)
 

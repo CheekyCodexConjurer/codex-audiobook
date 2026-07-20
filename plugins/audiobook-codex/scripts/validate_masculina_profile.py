@@ -5,7 +5,11 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import sys
+
+
+SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def sha256_file(path: Path) -> str:
@@ -31,13 +35,36 @@ def require_equal(actual: object, expected: object, label: str) -> None:
         raise RuntimeError(f"{label} mismatch: expected {expected!r}, got {actual!r}")
 
 
-def require_hashed_file(path_value: object, expected_hash: object, label: str) -> Path:
-    if not isinstance(path_value, str) or not isinstance(expected_hash, str):
+def require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or SHA256_RE.fullmatch(value) is None:
+        raise RuntimeError(f"{label} must be a SHA-256 hex string.")
+    return value
+
+
+def require_score(value: object, label: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RuntimeError(f"{label} must be numeric.")
+    if not 0 <= value <= 1:
+        raise RuntimeError(f"{label} must be between 0 and 1.")
+
+
+def require_hashed_file(
+    path_value: object,
+    expected_hash: object,
+    label: str,
+    *,
+    check_file: bool,
+) -> Path:
+    if not isinstance(path_value, str) or not path_value.strip():
         raise RuntimeError(f"{label} path and SHA-256 are required.")
+    expected_hash = require_sha256(expected_hash, f"{label} SHA-256")
     path = Path(path_value)
-    if not path.is_file():
-        raise RuntimeError(f"{label} is missing: {path}")
-    require_equal(sha256_file(path), expected_hash, f"{label} SHA-256")
+    if not path.is_absolute():
+        raise RuntimeError(f"{label} path must be absolute: {path}")
+    if check_file:
+        if not path.is_file():
+            raise RuntimeError(f"{label} is missing: {path}")
+        require_equal(sha256_file(path), expected_hash, f"{label} SHA-256")
     return path
 
 
@@ -64,9 +91,19 @@ def main() -> None:
     parser.add_argument("--renderer", type=Path, required=True)
     parser.add_argument("--promotion", type=Path, required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument(
+        "--evidence-mode",
+        choices=("full", "provenance"),
+        default="full",
+        help=(
+            "full verifies every retained external artifact; provenance verifies the "
+            "immutable declarations, bundled voice, renderer bindings, and report."
+        ),
+    )
     args = parser.parse_args()
 
     try:
+        full_evidence = args.evidence_mode == "full"
         renderer_path = args.renderer.expanduser().resolve()
         promotion_path = args.promotion.expanduser().resolve()
         report_path = args.report.expanduser().resolve()
@@ -84,6 +121,16 @@ def main() -> None:
         )
 
         renderer = load_renderer(renderer_path)
+        require_equal(
+            renderer.DEFAULT_VOICE_PROFILE_NAME,
+            "masculina-v1",
+            "default voice profile",
+        )
+        require_equal(
+            renderer.DEFAULT_REFERENCE_VOICE.resolve(),
+            renderer.MASCULINA_REFERENCE_VOICE.resolve(),
+            "default reference path",
+        )
         parameters = require_object(promotion.get("parameters"), "parameters")
         runtime = require_object(promotion.get("runtime"), "runtime")
         calibration = require_object(promotion.get("calibration"), "calibration")
@@ -125,11 +172,13 @@ def main() -> None:
             "runtime chatterbox version",
         )
         require_equal(runtime.get("model"), renderer_calibration["model"], "runtime model hashes")
-        require_equal(
-            runtime.get("renderer_sha256"),
-            sha256_file(renderer_path),
-            "runtime renderer hash",
-        )
+        require_sha256(runtime.get("renderer_sha256"), "runtime renderer hash")
+        if full_evidence:
+            require_equal(
+                runtime.get("renderer_sha256"),
+                sha256_file(renderer_path),
+                "runtime renderer hash",
+            )
 
         plugin_root = renderer_path.parent.parent
         reference_path_value = reference.get("path")
@@ -146,6 +195,8 @@ def main() -> None:
             renderer.MASCULINA_REFERENCE_VOICE_SHA256,
             "reference hash declaration",
         )
+        if not reference_path.is_file():
+            raise RuntimeError(f"Bundled voice reference is missing: {reference_path}")
         require_equal(
             sha256_file(reference_path),
             renderer.MASCULINA_REFERENCE_VOICE_SHA256,
@@ -155,10 +206,16 @@ def main() -> None:
         corpus = require_object(calibration.get("corpus"), "calibration corpus")
         selection = require_object(calibration.get("selection"), "calibration selection")
         corpus_path = require_hashed_file(
-            corpus.get("path"), corpus.get("sha256"), "calibration corpus"
+            corpus.get("path"),
+            corpus.get("sha256"),
+            "calibration corpus",
+            check_file=full_evidence,
         )
         selection_path = require_hashed_file(
-            selection.get("path"), selection.get("sha256"), "calibration selection"
+            selection.get("path"),
+            selection.get("sha256"),
+            "calibration selection",
+            check_file=full_evidence,
         )
         require_equal(
             corpus.get("sha256"),
@@ -170,84 +227,116 @@ def main() -> None:
             renderer_calibration["selection_sha256"],
             "renderer selection hash",
         )
-
-        corpus_json = load_json(corpus_path)
-        selection_json = load_json(selection_path)
-        selection_corpus = require_object(selection_json.get("corpus"), "selection corpus")
-        winner = require_object(selection_json.get("winner"), "selection winner")
-        require_equal(selection_corpus.get("sha256"), corpus.get("sha256"), "selection corpus hash")
-        selection_reference = require_object(
-            selection_corpus.get("voice_reference"), "selection voice reference"
-        )
-        require_equal(
-            selection_reference.get("sha256"),
-            renderer.MASCULINA_REFERENCE_VOICE_SHA256,
-            "selection voice reference hash",
-        )
-        require_hashed_file(
-            selection_reference.get("path"),
-            selection_reference.get("sha256"),
-            "selection voice reference",
-        )
-        corpus_reference = require_object(
-            corpus_json.get("voice_reference"), "corpus voice reference"
-        )
-        require_equal(
-            corpus_reference.get("sha256"),
-            renderer.MASCULINA_REFERENCE_VOICE_SHA256,
-            "corpus voice reference hash",
-        )
-        for key in (
-            "winner_id",
-            "robust_score",
-            "mean_composite_score",
-            "minimum_composite_score",
-        ):
-            expected = winner.get("id") if key == "winner_id" else winner.get(key)
-            require_equal(selection.get(key), expected, f"selection {key}")
         require_equal(
             selection.get("winner_id"),
             renderer_calibration["winner_id"],
             "renderer winner id",
         )
-        winner_parameters = require_object(winner.get("parameters"), "winner parameters")
         for key in (
-            "exaggeration",
-            "cfg_weight",
-            "temperature",
-            "repetition_penalty",
-            "min_p",
-            "top_p",
-            "seed",
+            "robust_score",
+            "mean_composite_score",
+            "minimum_composite_score",
         ):
-            require_equal(winner_parameters.get(key), parameters.get(key), f"winner {key}")
+            require_score(selection.get(key), f"selection {key}")
 
-        decision = require_object(selection_json.get("decision"), "selection decision")
-        review_record = require_object(decision.get("review"), "selection review record")
-        review_path = require_hashed_file(
-            review_record.get("path"),
-            review_record.get("sha256"),
-            "listening review",
-        )
         listening_review = require_object(
             promotion.get("listening_review"), "promotion listening review"
         )
         require_equal(listening_review.get("status"), "approved", "listening review status")
-        require_equal(listening_review.get("path"), str(review_path), "listening review path")
-        require_equal(
+        promotion_review_path = require_hashed_file(
+            listening_review.get("path"),
             listening_review.get("sha256"),
-            sha256_file(review_path),
-            "listening review hash",
+            "listening review",
+            check_file=full_evidence,
         )
-        review_json = load_json(review_path)
-        require_equal(review_json.get("decision"), "approved", "human decision")
-        review_result = require_object(review_json.get("result"), "human review result")
-        for prompt in ("01-narracao", "02-dialogo", "03-semiotica", "overall"):
-            require_equal(review_result.get(prompt), "A", f"human review {prompt}")
-        resolved = require_object(
-            review_json.get("resolved_candidate"), "resolved human candidate"
-        )
-        require_equal(resolved.get("candidate_id"), winner.get("id"), "resolved candidate id")
+
+        if full_evidence:
+            corpus_json = load_json(corpus_path)
+            selection_json = load_json(selection_path)
+            selection_corpus = require_object(
+                selection_json.get("corpus"), "selection corpus"
+            )
+            winner = require_object(selection_json.get("winner"), "selection winner")
+            require_equal(
+                selection_corpus.get("sha256"),
+                corpus.get("sha256"),
+                "selection corpus hash",
+            )
+            selection_reference = require_object(
+                selection_corpus.get("voice_reference"), "selection voice reference"
+            )
+            require_equal(
+                selection_reference.get("sha256"),
+                renderer.MASCULINA_REFERENCE_VOICE_SHA256,
+                "selection voice reference hash",
+            )
+            require_hashed_file(
+                selection_reference.get("path"),
+                selection_reference.get("sha256"),
+                "selection voice reference",
+                check_file=True,
+            )
+            corpus_reference = require_object(
+                corpus_json.get("voice_reference"), "corpus voice reference"
+            )
+            require_equal(
+                corpus_reference.get("sha256"),
+                renderer.MASCULINA_REFERENCE_VOICE_SHA256,
+                "corpus voice reference hash",
+            )
+            for key in (
+                "winner_id",
+                "robust_score",
+                "mean_composite_score",
+                "minimum_composite_score",
+            ):
+                expected = winner.get("id") if key == "winner_id" else winner.get(key)
+                require_equal(selection.get(key), expected, f"selection {key}")
+            winner_parameters = require_object(winner.get("parameters"), "winner parameters")
+            for key in (
+                "exaggeration",
+                "cfg_weight",
+                "temperature",
+                "repetition_penalty",
+                "min_p",
+                "top_p",
+                "seed",
+            ):
+                require_equal(winner_parameters.get(key), parameters.get(key), f"winner {key}")
+
+            decision = require_object(selection_json.get("decision"), "selection decision")
+            review_record = require_object(
+                decision.get("review"), "selection review record"
+            )
+            review_path = require_hashed_file(
+                review_record.get("path"),
+                review_record.get("sha256"),
+                "selection listening review",
+                check_file=True,
+            )
+            require_equal(
+                str(promotion_review_path),
+                str(review_path),
+                "listening review path",
+            )
+            require_equal(
+                listening_review.get("sha256"),
+                review_record.get("sha256"),
+                "listening review hash",
+            )
+            review_json = load_json(review_path)
+            require_equal(review_json.get("decision"), "approved", "human decision")
+            review_result = require_object(review_json.get("result"), "human review result")
+            for prompt in ("01-narracao", "02-dialogo", "03-semiotica", "overall"):
+                require_equal(review_result.get(prompt), "A", f"human review {prompt}")
+            resolved = require_object(
+                review_json.get("resolved_candidate"), "resolved human candidate"
+            )
+            require_equal(
+                resolved.get("candidate_id"),
+                winner.get("id"),
+                "resolved candidate id",
+            )
 
         raw_wav = require_object(reproduction.get("raw_wav"), "raw WAV")
         publication_wav = require_object(
@@ -256,49 +345,65 @@ def main() -> None:
         delivery_mp3 = require_object(reproduction.get("delivery_mp3"), "delivery MP3")
         input_record = require_object(reproduction.get("input"), "smoke input")
         manifest_record = require_object(reproduction.get("manifest"), "smoke manifest")
-        require_hashed_file(input_record.get("path"), input_record.get("sha256"), "smoke input")
-        require_hashed_file(raw_wav.get("path"), raw_wav.get("sha256"), "approved raw WAV")
+        require_hashed_file(
+            input_record.get("path"),
+            input_record.get("sha256"),
+            "smoke input",
+            check_file=full_evidence,
+        )
+        require_hashed_file(
+            raw_wav.get("path"),
+            raw_wav.get("sha256"),
+            "approved raw WAV",
+            check_file=full_evidence,
+        )
         require_hashed_file(
             publication_wav.get("path"),
             publication_wav.get("sha256"),
             "publication WAV",
+            check_file=full_evidence,
         )
         require_hashed_file(
-            delivery_mp3.get("path"), delivery_mp3.get("sha256"), "approved delivery MP3"
+            delivery_mp3.get("path"),
+            delivery_mp3.get("sha256"),
+            "approved delivery MP3",
+            check_file=full_evidence,
         )
         manifest_path = require_hashed_file(
             manifest_record.get("path"),
             manifest_record.get("sha256"),
             "production smoke manifest",
+            check_file=full_evidence,
         )
         require_equal(
             raw_wav.get("sha256"),
             renderer_calibration["main_prompt_wav_sha256"],
             "renderer main prompt WAV hash",
         )
-        smoke_manifest = load_json(manifest_path)
-        require_equal(smoke_manifest.get("profile"), "masculina-v1", "smoke profile")
-        require_equal(
-            smoke_manifest.get("conditioning_strategy"),
-            promotion.get("conditioning_strategy"),
-            "smoke conditioning strategy",
-        )
-        require_equal(
-            smoke_manifest.get("seed_strategy"),
-            promotion.get("seed_strategy"),
-            "smoke seed strategy",
-        )
-        require_equal(
-            smoke_manifest.get("master_wav_sha256"),
-            raw_wav.get("sha256"),
-            "smoke master WAV hash",
-        )
-        smoke_runtime = require_object(smoke_manifest.get("runtime"), "smoke runtime")
-        require_equal(
-            smoke_runtime.get("renderer_sha256"),
-            sha256_file(renderer_path),
-            "smoke renderer hash",
-        )
+        if full_evidence:
+            smoke_manifest = load_json(manifest_path)
+            require_equal(smoke_manifest.get("profile"), "masculina-v1", "smoke profile")
+            require_equal(
+                smoke_manifest.get("conditioning_strategy"),
+                promotion.get("conditioning_strategy"),
+                "smoke conditioning strategy",
+            )
+            require_equal(
+                smoke_manifest.get("seed_strategy"),
+                promotion.get("seed_strategy"),
+                "smoke seed strategy",
+            )
+            require_equal(
+                smoke_manifest.get("master_wav_sha256"),
+                raw_wav.get("sha256"),
+                "smoke master WAV hash",
+            )
+            smoke_runtime = require_object(smoke_manifest.get("runtime"), "smoke runtime")
+            require_equal(
+                smoke_runtime.get("renderer_sha256"),
+                sha256_file(renderer_path),
+                "smoke renderer hash",
+            )
 
         dsp = require_object(promotion.get("dsp"), "DSP decision")
         require_equal(dsp.get("status"), "raw-wav-retained", "DSP status")
@@ -322,7 +427,7 @@ def main() -> None:
                 raise RuntimeError(
                     f"Calibration report does not match promotion evidence: {fragment}"
                 )
-        print("VALID masculina-v1 promotion")
+        print(f"VALID masculina-v1 promotion ({args.evidence_mode} evidence)")
     except RuntimeError as error:
         print(f"INVALID masculina-v1 promotion: {error}", file=sys.stderr)
         raise SystemExit(1)

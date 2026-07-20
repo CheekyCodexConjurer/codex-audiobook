@@ -143,11 +143,104 @@ def main() -> None:
         )
         assert validate_layout(paths.public_root, "working") == []
 
+        canonical_records: dict[str, dict] = {}
         for suffix in (".epub", ".pdf", ".mp3"):
-            (paths.public_root / f"{paths.public_root.name}{suffix}").write_bytes(
-                suffix.encode("ascii")
+            public_file = paths.public_root / f"{paths.public_root.name}{suffix}"
+            public_file.write_bytes(suffix.encode("ascii"))
+            canonical_records[suffix] = publication_record(
+                public_file.name,
+                f"exports/{suffix.removeprefix('.')}/canonical{suffix}",
+                sha256_file(public_file),
             )
+        fluid_records: dict[str, dict] = {}
+        for suffix in (".epub", ".pdf"):
+            fluid_file = paths.public_root / f"livro-de-teste-fluida{suffix}"
+            fluid_file.write_bytes(f"fluid{suffix}".encode("ascii"))
+            fluid_records[suffix] = publication_record(
+                fluid_file.name,
+                f"exports/{suffix.removeprefix('.')}/{fluid_file.name}",
+                sha256_file(fluid_file),
+            )
+            fluid_records[suffix].update(
+                {
+                    "text_edition": "fluid-pt-br",
+                    "image_edition": "original",
+                    "path_root": "book",
+                }
+            )
+        publication_manifest_path = (
+            paths.assembly_root / "metadata" / "publication-manifest.json"
+        )
+        publication_manifest = {
+            "schema_version": "1.1",
+            "artifacts": {
+                "audio": canonical_records[".mp3"],
+                "epub": canonical_records[".epub"],
+                "pdf": canonical_records[".pdf"],
+                "epub_editions": {
+                    "original:original": canonical_records[".epub"],
+                    "fluid-pt-br:original": fluid_records[".epub"],
+                },
+                "pdf_editions": {
+                    "original:original": canonical_records[".pdf"],
+                    "fluid-pt-br:original": fluid_records[".pdf"],
+                },
+            },
+        }
+
+        def write_publication_manifest(value: dict) -> None:
+            publication_manifest_path.write_text(
+                json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+        write_publication_manifest(publication_manifest)
         assert validate_layout(paths.public_root, "published") == []
+
+        missing_pair = json.loads(json.dumps(publication_manifest))
+        missing_pair["artifacts"]["pdf_editions"].pop("fluid-pt-br:original")
+        write_publication_manifest(missing_pair)
+        assert any(
+            "edition keys must match exactly" in error
+            for error in validate_layout(paths.public_root, "published")
+        )
+
+        invalid_hash = json.loads(json.dumps(publication_manifest))
+        invalid_hash["artifacts"]["epub_editions"]["fluid-pt-br:original"].pop(
+            "sha256"
+        )
+        write_publication_manifest(invalid_hash)
+        assert any(
+            "sha256 must contain 64 hexadecimal characters" in error
+            for error in validate_layout(paths.public_root, "published")
+        )
+
+        wrong_collection = json.loads(json.dumps(publication_manifest))
+        wrong_collection["artifacts"]["epub_editions"].pop(
+            "fluid-pt-br:original"
+        )
+        wrong_collection["artifacts"]["pdf_editions"][
+            "fluid-pt-br:original"
+        ] = fluid_records[".epub"]
+        write_publication_manifest(wrong_collection)
+        wrong_collection_errors = validate_layout(
+            paths.public_root,
+            "published",
+        )
+        assert any(
+            "root-level .pdf filename" in error
+            for error in wrong_collection_errors
+        )
+        assert any(
+            "not a valid fluid publication" in error
+            for error in wrong_collection_errors
+        )
+        write_publication_manifest(publication_manifest)
 
         extra = paths.public_root / "notes.txt"
         extra.write_text("not allowed", encoding="utf-8")
@@ -156,6 +249,14 @@ def main() -> None:
             for error in validate_layout(paths.public_root, "published")
         )
         extra.unlink()
+
+        untracked_epub = paths.public_root / "untracked.epub"
+        untracked_epub.write_bytes(b"untracked")
+        assert any(
+            "not a valid fluid publication" in error
+            for error in validate_layout(paths.public_root, "published")
+        )
+        untracked_epub.unlink()
 
         legacy = root / "legacy"
         (legacy / "metadata").mkdir(parents=True)

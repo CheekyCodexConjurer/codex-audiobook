@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "state_model": {
+    "monotonic_order": [
+      "planned",
+      "leased",
+      "in_progress",
+      "ready_for_verification",
+      "verified",
+      "merged"
+    ],
+    "terminal_states": [
+      "blocked",
+      "abandoned"
+    ]
+  },
+  "claims": [
+    {
+      "claim_id": "TRANSCRIBE-chapter-01",
+      "stage": "TRANSCRIBE",
+      "status": "planned",
+      "claim_order": 1,
+      "priority": 100,
+      "depends_on": [],
+      "producer": "audiobook-transcriber",
+      "verifier": "audiobook-verifier",
+      "read_set": [
+        {
+          "path": "metadata/book-map.json",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      ],
+      "write_set": [
+        "text/source/pages/page-0001.txt",
+        "text/source/chapters/chapter-01.txt"
+      ],
+      "canonical_targets": [
+        "text/source/chapters/chapter-01.txt"
+      ],
+      "no_touch": [
+        "text/source/pages/page-0002.txt"
+      ],
+      "scope": {
+        "unit_kind": "chapter",
+        "unit_ids": [
+          "chapter-01"
+        ],
+        "context_unit_ids": []
+      },
+      "context": {
+        "notes": ""
+      },
+      "validation": {
+        "requires_verification": true,
+        "commands": []
+      },
+      "lease": {
+        "holder": "",
+        "issued_at": "",
+        "expires_at": ""
+      }
+    }
+  ]
+}

@@ -153,8 +153,34 @@ def _chapter_records(
     records: dict[int, dict],
     output_dir: Path,
 ) -> tuple[list[dict], list[Path]] | None:
-    chapter_records: list[dict] = []
+    chapter_records = _chapter_journal_records(chapter, records)
+    if chapter_records is None:
+        return None
     paths: list[Path] = []
+    for record in chapter_records:
+        index = record["index"]
+        expected_relative = Path("segments") / f"segment-{index:04d}.wav"
+        segments_root = (output_dir / "segments").resolve()
+        path = (output_dir / expected_relative).resolve()
+        try:
+            path.relative_to(segments_root)
+        except ValueError:
+            return None
+        if not path.is_file():
+            return None
+        _, audio_sha256 = wav_details(path)
+        if audio_sha256 != record["audio_sha256"]:
+            return None
+        validate_speech_wav(path)
+        paths.append(path)
+    return chapter_records, paths
+
+
+def _chapter_journal_records(
+    chapter: ChapterSpec,
+    records: dict[int, dict],
+) -> list[dict] | None:
+    chapter_records: list[dict] = []
     for entry in chapter.segments:
         index = entry.get("index")
         record = records.get(index) if isinstance(index, int) else None
@@ -170,19 +196,8 @@ def _chapter_records(
         expected_relative = Path("segments") / f"segment-{index:04d}.wav"
         if Path(record["path"]) != expected_relative:
             return None
-        segments_root = (output_dir / "segments").resolve()
-        path = (output_dir / expected_relative).resolve()
-        try:
-            path.relative_to(segments_root)
-        except ValueError:
-            return None
-        if not path.is_file() or sha256_file(path) != record["audio_sha256"]:
-            return None
-        wav_details(path)
-        validate_speech_wav(path)
         chapter_records.append(record)
-        paths.append(path)
-    return chapter_records, paths
+    return chapter_records
 
 
 def chapter_identity(chapter: ChapterSpec, records: list[dict], journal: dict) -> dict:
@@ -342,6 +357,109 @@ def _existing_complete(
     )
 
 
+def _incomplete_chapter_entry(chapter: ChapterSpec) -> dict:
+    return {
+        "id": chapter.id,
+        "status": "incomplete",
+        "locutor_chapter": chapter.locutor_chapter,
+        "logical_pages": list(chapter.logical_pages),
+        "segment_indexes": [entry["index"] for entry in chapter.segments],
+    }
+
+
+def _same_incomplete_chapter_entry(existing: object, chapter: ChapterSpec) -> bool:
+    return (
+        isinstance(existing, dict)
+        and existing.get("id") == chapter.id
+        and existing.get("status") == "incomplete"
+        and existing.get("locutor_chapter") == chapter.locutor_chapter
+        and existing.get("logical_pages") == list(chapter.logical_pages)
+        and existing.get("segment_indexes") == [entry["index"] for entry in chapter.segments]
+    )
+
+
+def _reuse_unselected_chapter_entry(
+    chapter: ChapterSpec,
+    records: dict[int, dict],
+    existing: object,
+    publication: dict,
+    journal: dict,
+) -> dict:
+    if _same_incomplete_chapter_entry(existing, chapter):
+        return existing
+    if isinstance(existing, dict) and existing.get("status") == "complete":
+        chapter_records = _chapter_journal_records(chapter, records)
+        if chapter_records is not None:
+            identity = chapter_identity(chapter, chapter_records, journal)
+            if (
+                existing.get("assembly_identity") == identity
+                and existing.get("publication") == publication
+            ):
+                return existing
+    return _incomplete_chapter_entry(chapter)
+
+
+def _assemble_chapter_entry(
+    book_root: Path,
+    output_dir: Path,
+    chapter: ChapterSpec,
+    records: dict[int, dict],
+    journal: dict,
+    publication: dict,
+    publication_tempo: float,
+    existing: object,
+    temp_root: Path,
+) -> dict:
+    resolved = _chapter_records(chapter, records, output_dir)
+    if resolved is None:
+        return _incomplete_chapter_entry(chapter)
+    chapter_records, paths = resolved
+    identity = chapter_identity(chapter, chapter_records, journal)
+    master_wav, wav, mp3 = chapter_paths(output_dir, chapter.id)
+    if _existing_complete(
+        existing,
+        identity,
+        publication,
+        master_wav,
+        wav,
+        mp3,
+    ):
+        master_duration, _ = wav_details(master_wav)
+        duration, _ = wav_details(wav)
+    else:
+        pauses = [
+            float(entry["pause_after"]["seconds"])
+            for entry in chapter.segments[:-1]
+        ]
+        master_duration = _atomic_join(paths, master_wav, pauses, temp_root)
+        duration = _atomic_apply_publication_tempo(
+            master_wav,
+            wav,
+            publication_tempo,
+            temp_root,
+        )
+        _atomic_transcode(wav, mp3, temp_root)
+    return {
+        "id": chapter.id,
+        "status": "complete",
+        "locutor_chapter": chapter.locutor_chapter,
+        "logical_pages": list(chapter.logical_pages),
+        "segment_indexes": [entry["index"] for entry in chapter.segments],
+        "assembly_identity": identity,
+        "publication": publication,
+        "audio": {
+            "master_wav": master_wav.relative_to(book_root).as_posix(),
+            "master_wav_sha256": sha256_file(master_wav),
+            "master_duration_seconds": round(master_duration, 3),
+            "wav": wav.relative_to(book_root).as_posix(),
+            "wav_sha256": sha256_file(wav),
+            "mp3": mp3.relative_to(book_root).as_posix(),
+            "mp3_sha256": sha256_file(mp3),
+            "duration_seconds": round(duration, 3),
+        },
+    }
+
+
 def assemble_chapters(
     book_root: Path,
     output_dir: Path,
@@ -379,89 +497,28 @@ def assemble_chapters(
     for chapter in all_chapters:
         existing = previous_chapters.get(chapter.id)
         if selected is not None and chapter.id not in selected:
-            resolved = _chapter_records(chapter, records, output_dir)
-            if resolved is not None:
-                chapter_records, _ = resolved
-                identity = chapter_identity(chapter, chapter_records, journal)
-                master_wav, wav, mp3 = chapter_paths(output_dir, chapter.id)
-                if _existing_complete(
+            manifest_chapters.append(
+                _reuse_unselected_chapter_entry(
+                    chapter,
+                    records,
                     existing,
-                    identity,
                     publication,
-                    master_wav,
-                    wav,
-                    mp3,
-                ):
-                    manifest_chapters.append(existing)
-                    continue
-            manifest_chapters.append(
-                {
-                    "id": chapter.id,
-                    "status": "incomplete",
-                    "locutor_chapter": chapter.locutor_chapter,
-                    "logical_pages": list(chapter.logical_pages),
-                    "segment_indexes": [entry["index"] for entry in chapter.segments],
-                }
+                    journal,
+                )
             )
             continue
-        resolved = _chapter_records(chapter, records, output_dir)
-        if resolved is None:
-            manifest_chapters.append(
-                {
-                    "id": chapter.id,
-                    "status": "incomplete",
-                    "locutor_chapter": chapter.locutor_chapter,
-                    "logical_pages": list(chapter.logical_pages),
-                    "segment_indexes": [entry["index"] for entry in chapter.segments],
-                }
-            )
-            continue
-        chapter_records, paths = resolved
-        identity = chapter_identity(chapter, chapter_records, journal)
-        master_wav, wav, mp3 = chapter_paths(output_dir, chapter.id)
-        if _existing_complete(
-            existing,
-            identity,
-            publication,
-            master_wav,
-            wav,
-            mp3,
-        ):
-            master_duration, _ = wav_details(master_wav)
-            duration, _ = wav_details(wav)
-        else:
-            pauses = [
-                float(entry["pause_after"]["seconds"])
-                for entry in chapter.segments[:-1]
-            ]
-            master_duration = _atomic_join(paths, master_wav, pauses, temp_root)
-            duration = _atomic_apply_publication_tempo(
-                master_wav,
-                wav,
+        manifest_chapters.append(
+            _assemble_chapter_entry(
+                book_root,
+                output_dir,
+                chapter,
+                records,
+                journal,
+                publication,
                 publication_tempo,
+                existing,
                 temp_root,
             )
-            _atomic_transcode(wav, mp3, temp_root)
-        manifest_chapters.append(
-            {
-                "id": chapter.id,
-                "status": "complete",
-                "locutor_chapter": chapter.locutor_chapter,
-                "logical_pages": list(chapter.logical_pages),
-                "segment_indexes": [entry["index"] for entry in chapter.segments],
-                "assembly_identity": identity,
-                "publication": publication,
-                "audio": {
-                    "master_wav": master_wav.relative_to(book_root).as_posix(),
-                    "master_wav_sha256": sha256_file(master_wav),
-                    "master_duration_seconds": round(master_duration, 3),
-                    "wav": wav.relative_to(book_root).as_posix(),
-                    "wav_sha256": sha256_file(wav),
-                    "mp3": mp3.relative_to(book_root).as_posix(),
-                    "mp3_sha256": sha256_file(mp3),
-                    "duration_seconds": round(duration, 3),
-                },
-            }
         )
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -482,6 +539,122 @@ def assemble_chapters(
     }
     write_json(manifest_path, manifest)
     return manifest
+
+
+def assemble_one_chapter(
+    book_root: Path,
+    output_dir: Path,
+    plan: dict,
+    journal: dict,
+    chapter_id: str,
+    publication_tempo: float = DEFAULT_PUBLICATION_TEMPO,
+) -> dict:
+    return assemble_chapters(
+        book_root,
+        output_dir,
+        plan,
+        journal,
+        [chapter_id],
+        publication_tempo,
+    )
+
+
+def _manifest_chapter_master_path(
+    book_root: Path,
+    output_dir: Path,
+    entry: dict,
+) -> Path:
+    audio = entry.get("audio")
+    if not isinstance(audio, dict):
+        raise RuntimeError(f"Chapter {entry.get('id')!r} audio record is missing.")
+    path = resolve_under(book_root, audio.get("master_wav"), (Path("audio"),))
+    if path is None:
+        raise RuntimeError(f"Chapter {entry.get('id')!r} master WAV path is unsafe.")
+    original_root, _, _ = chapter_layout_paths(book_root, output_dir)
+    try:
+        path.relative_to(original_root)
+    except ValueError as error:
+        raise RuntimeError(
+            f"Chapter {entry.get('id')!r} master WAV must remain under {original_root}."
+        ) from error
+    if not path.is_file():
+        raise RuntimeError(f"Chapter {entry.get('id')!r} master WAV is missing.")
+    _, master_wav_sha256 = wav_details(path)
+    if audio.get("master_wav_sha256") != master_wav_sha256:
+        raise RuntimeError(f"Chapter {entry.get('id')!r} master WAV hash does not match.")
+    validate_speech_wav(path)
+    return path
+
+
+def _safe_full_book_target(
+    book_root: Path,
+    output_dir: Path,
+    target: Path | None,
+) -> Path:
+    if target is None:
+        target = output_dir / "chapters" / "original" / "audiobook.master.wav"
+    book_root = book_root.resolve()
+    output_dir = output_dir.resolve()
+    target = target.expanduser().resolve()
+    try:
+        target.relative_to(output_dir)
+        relative_target = target.relative_to(book_root).as_posix()
+    except ValueError as error:
+        raise RuntimeError(f"Full-book master target must remain under {output_dir}.") from error
+    safe_target = resolve_under(book_root, relative_target, (Path("audio"),))
+    if safe_target is None or safe_target != target:
+        raise RuntimeError("Full-book master target path is unsafe.")
+    return target
+
+
+def _explicit_interchapter_pauses(
+    interchapter_pauses: Iterable[float] | None,
+    chapter_count: int,
+) -> list[float]:
+    if interchapter_pauses is None:
+        raise RuntimeError("Full-book master assembly requires explicit interchapter pauses.")
+    pauses: list[float] = []
+    for value in interchapter_pauses:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise RuntimeError("Interchapter pauses must be numeric seconds.")
+        pauses.append(max(0.0, float(value)))
+    if len(pauses) != max(0, chapter_count - 1):
+        raise RuntimeError("Interchapter pauses must have one entry between each chapter master.")
+    return pauses
+
+
+def assemble_full_book_master(
+    book_root: Path,
+    output_dir: Path,
+    chapter_manifest: dict,
+    target: Path | None = None,
+    interchapter_pauses: Iterable[float] | None = None,
+) -> dict:
+    _, _, temp_root = chapter_layout_paths(book_root, output_dir)
+    entries = chapter_manifest.get("chapters")
+    if not isinstance(entries, list) or not entries:
+        raise RuntimeError("Chapter manifest must contain chapters before full-book assembly.")
+    if any(not isinstance(entry, dict) or entry.get("status") != "complete" for entry in entries):
+        raise RuntimeError("Full-book master requires every chapter to be complete.")
+    pauses = _explicit_interchapter_pauses(interchapter_pauses, len(entries))
+    master_paths = [
+        _manifest_chapter_master_path(book_root, output_dir, entry)
+        for entry in entries
+    ]
+    target = _safe_full_book_target(book_root, output_dir, target)
+    duration = _atomic_join(master_paths, target, pauses, temp_root)
+    return {
+        "status": "complete",
+        "master_wav": target.relative_to(book_root).as_posix(),
+        "master_wav_sha256": sha256_file(target),
+        "master_duration_seconds": round(duration, 3),
+        "chapter_ids": [entry["id"] for entry in entries],
+        "chapter_master_wavs": [
+            path.relative_to(book_root).as_posix()
+            for path in master_paths
+        ],
+        "interchapter_pauses_seconds": pauses,
+    }
 
 
 def main() -> None:

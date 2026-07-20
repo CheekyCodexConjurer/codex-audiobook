@@ -3,7 +3,7 @@
 ## Workspace Layout
 
 ```text
-E:\Pessoal\e-books\_voice-calibration-<profile-id>\
+E:\Pessoal\Library\_voice-calibration-<profile-id>\
 |- validation-corpus\
 |  |- 01-narracao.txt
 |  |- 02-dialogo.txt
@@ -18,6 +18,8 @@ E:\Pessoal\e-books\_voice-calibration-<profile-id>\
 `corpus.json` is the source of truth for the text hashes and imported local audio
 copies. A draft corpus has only text hashes. A ready corpus has a voice reference and
 one target audio per prompt, all with SHA-256 hashes.
+
+Historical promotion manifests and dated reports are an explicit immutable-provenance allowlist for old `E:\Pessoal\e-books` paths. New calibration workspaces default to `E:\Pessoal\Library`; do not migrate or edit historical paths merely to match the current default.
 
 ## Required Evidence
 
@@ -34,6 +36,19 @@ For every decision retain:
 - listening-review notes;
 - DSP comparison, when DSP was considered;
 - promotion decision and production smoke hash.
+
+## Repository Validation Modes
+
+- `provenance` verifies that an approved historical promotion remains internally
+  consistent with its report, bundled reference voice, declared SHA-256 values, and
+  current renderer profile constants. It accepts an absent historical workspace but
+  never treats absent bytes as re-verified evidence.
+- `full` reopens every declared external path and verifies the retained corpus,
+  selection, listening review, reproduction inputs, manifests, and audio bytes.
+- Routine repository checks use `provenance`. Any official profile addition,
+  replacement, or re-promotion requires `scripts\validate.ps1 -FullVoiceEvidence`;
+  missing retained evidence blocks that decision until it is restored or superseded by
+  a new complete calibration.
 
 ## Decision Boundaries
 

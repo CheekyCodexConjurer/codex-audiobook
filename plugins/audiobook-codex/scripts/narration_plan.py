@@ -15,6 +15,8 @@ from chatterbox_text import (
     NarratorTextError,
     prepare_chatterbox_segments,
 )
+from epub_layout import layout_document_index, split_text_blocks
+from validate_narrator_lineage import validate_lineage
 from path_safety import resolve_under
 
 
@@ -127,12 +129,57 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _source_text_with_layout_joins(source: str, layout_document: dict | None) -> str:
+    if layout_document is None:
+        return source
+    layout_blocks = layout_document.get("blocks")
+    if not isinstance(layout_blocks, list):
+        raise RuntimeError("Fluid EPUB layout document blocks must be an array.")
+    text_blocks = split_text_blocks(source)
+    if len(layout_blocks) != len(text_blocks):
+        raise RuntimeError(
+            "Fluid EPUB layout block count does not match the narrator base chapter."
+        )
+
+    joined_positions: set[int] = set()
+    for position, block in enumerate(layout_blocks, start=1):
+        if not isinstance(block, dict) or block.get("block_index") != position:
+            raise RuntimeError(
+                "Fluid EPUB layout blocks must match the narrator base chapter order."
+            )
+        if (
+            block.get("join_with_previous") is True
+            and position > 1
+            and isinstance(layout_blocks[position - 2], dict)
+            and layout_blocks[position - 2].get("kind") == "paragraph"
+        ):
+            joined_positions.add(position)
+
+    result = text_blocks[0] if text_blocks else ""
+    for position, block_text in enumerate(text_blocks[1:], start=2):
+        result += ("\n" if position in joined_positions else "\n\n") + block_text
+    return result
+
+
 def _body_units(lines: list[str]) -> list[SourceUnit]:
     if not lines:
         return []
     joined = " ".join(lines)
     letter_count = sum(character.isalpha() for character in joined)
     uppercase = letter_count > 2 and joined.upper() == joined
+    title_heading = (
+        len(lines) == 1
+        and len(joined) <= 96
+        and bool(joined)
+        and joined[0].isupper()
+        and not joined.endswith((":", ";"))
+        and not _TERMINAL_PUNCTUATION.search(joined)
+    )
+    question_heading = (
+        len(lines) == 1
+        and len(joined) <= 80
+        and joined.endswith("?")
+    )
     if (
         len(lines) >= 3
         and max(len(line) for line in lines) <= 64
@@ -144,7 +191,14 @@ def _body_units(lines: list[str]) -> list[SourceUnit]:
     if joined.startswith(("“", '"', "'")):
         role = "dialogue"
     else:
-        role = "heading" if uppercase or _HEADING_LABEL.match(joined) else "paragraph"
+        role = (
+            "heading"
+            if uppercase
+            or title_heading
+            or question_heading
+            or _HEADING_LABEL.match(joined)
+            else "paragraph"
+        )
     return [SourceUnit(joined, role)]
 
 
@@ -194,6 +248,23 @@ def _source_units(text: str) -> list[SourceUnit]:
             current = []
     if current:
         groups.append(current)
+
+    merged_groups: list[list[str]] = []
+    for group in groups:
+        previous_line = merged_groups[-1][-1] if merged_groups else ""
+        if (
+            merged_groups
+            and group
+            and (
+                re.match(r"^[a-zà-öø-ÿ]", group[0])
+                or previous_line.endswith(("-", "‐", "‑"))
+            )
+            and not _TERMINAL_PUNCTUATION.search(merged_groups[-1][-1])
+        ):
+            merged_groups[-1].extend(group)
+        else:
+            merged_groups.append(group)
+    groups = merged_groups
 
     units: list[SourceUnit] = []
     for group in groups:
@@ -270,7 +341,11 @@ def _mapped_boundaries(source: str, locutor: str, units: list[SourceUnit]) -> li
     return mapped
 
 
-def _locutor_units(source: str, locutor: str) -> list[tuple[SourceUnit, str]]:
+def _locutor_units(
+    source: str,
+    locutor: str,
+    allow_collapsed_source_units: bool = False,
+) -> list[tuple[SourceUnit, str]]:
     source_units = _source_units(source)
     if not source_units:
         raise RuntimeError("Source chapter has no semantic units.")
@@ -284,6 +359,9 @@ def _locutor_units(source: str, locutor: str) -> list[tuple[SourceUnit, str]]:
     starts: list[int] = []
     for word_index in boundaries[:-1]:
         if word_index >= len(locutor_matches):
+            if allow_collapsed_source_units:
+                starts.append(len(normalized_locutor))
+                continue
             raise RuntimeError(
                 "Cannot align source units; the approved locutor text ended before "
                 "the source semantic boundary."
@@ -304,9 +382,15 @@ def _locutor_units(source: str, locutor: str) -> list[tuple[SourceUnit, str]]:
         start_word = boundaries[index]
         end_word = boundaries[index + 1]
         if end_word <= start_word:
-            raise RuntimeError(
-                f"Cannot align source unit {index + 1}; the approved locutor text diverged."
-            )
+            if not allow_collapsed_source_units:
+                raise RuntimeError(
+                    f"Cannot align source unit {index + 1}; the approved locutor text diverged."
+                )
+            # A reviewed narrator replacement can collapse several source-only
+            # labels (for example, a printed diagram grid) into one objective
+            # spoken description. The narrator-lineage gate proves that the
+            # omitted source span is covered before plan construction.
+            continue
         start = starts[index]
         end = (
             starts[index + 1]
@@ -334,6 +418,58 @@ def _locutor_units(source: str, locutor: str) -> list[tuple[SourceUnit, str]]:
             f"{previous_spoken} {closure.group('closure')}",
         )
         result[index] = (current_unit, remainder)
+
+    if allow_collapsed_source_units:
+        merged: list[tuple[SourceUnit, str, int]] = []
+        for unit, spoken in result:
+            first_letter = next(
+                (character for character in spoken if character.isalpha()),
+                "",
+            )
+            source_is_bullet = unit.text.lstrip().startswith(("•", "▪", "◦", "‣"))
+            if merged:
+                previous_unit, previous_spoken, collapsed_count = merged[-1]
+                if (
+                    first_letter
+                    and first_letter.islower()
+                    and unit.role == previous_unit.role
+                    and unit.role in {"heading", "paragraph"}
+                    and not source_is_bullet
+                    and not _TERMINAL_PUNCTUATION.search(previous_spoken)
+                ):
+                    merged[-1] = (
+                        SourceUnit(
+                            f"{previous_unit.text} {unit.text}",
+                            previous_unit.role,
+                        ),
+                        f"{previous_spoken} {spoken}",
+                        collapsed_count + 1,
+                    )
+                    continue
+            merged.append((unit, spoken, 1))
+        result = [
+            (
+                SourceUnit(unit.text, "paragraph")
+                if unit.role == "heading" and collapsed_count > 1
+                else unit,
+                spoken,
+            )
+            for unit, spoken, collapsed_count in merged
+        ]
+
+    result = [
+        (
+            SourceUnit(unit.text, "paragraph")
+            if (
+                unit.role == "heading"
+                and len(spoken) > 96
+                and _TERMINAL_PUNCTUATION.search(spoken)
+            )
+            else unit,
+            spoken,
+        )
+        for unit, spoken in result
+    ]
 
     reconstructed = normalized_text(" ".join(spoken for _, spoken in result))
     if reconstructed != normalized_locutor:
@@ -560,6 +696,7 @@ def _chapter_records(book_root: Path, input_file: Path) -> list[dict]:
         raise RuntimeError("Narrator changes output has no base outputs.")
 
     base_edition = changes.get("base_edition")
+    layout_by_document: dict[str, dict] = {}
     if base_edition == "source":
         ledger_path = book_root / "metadata" / "text-ledger.json"
         ledger_label = "text ledger"
@@ -570,8 +707,21 @@ def _chapter_records(book_root: Path, input_file: Path) -> list[dict]:
         ledger_label = "translation ledger"
         text_key = "translation_file"
         allowed_root = Path("translation") / "pt-BR" / "chapters"
+    elif base_edition == "fluid-pt-br":
+        ledger_path = book_root / "metadata" / "fluid-edition-ledger.json"
+        ledger_label = "fluid edition ledger"
+        text_key = "fluid_file"
+        allowed_root = Path("fluid") / "pt-BR" / "chapters"
+        layout = read_json(
+            book_root / "metadata" / "epub-layout.fluid.json",
+            "fluid EPUB layout",
+        )
+        layout_by_document = layout_document_index(layout)
     else:
-        raise RuntimeError("Narrator changes base_edition must be source or translated-pt-br.")
+        raise RuntimeError(
+            "Narrator changes base_edition must be source, translated-pt-br, "
+            "or fluid-pt-br."
+        )
     ledger = read_json(ledger_path, ledger_label)
     records = {
         record.get("id"): record
@@ -585,6 +735,11 @@ def _chapter_records(book_root: Path, input_file: Path) -> list[dict]:
         source_record = records.get(base["id"])
         if not isinstance(source_record, dict):
             raise RuntimeError(f"Missing source chapter record {base['id']!r}.")
+        layout_document = layout_by_document.get(base["id"])
+        if base_edition == "fluid-pt-br" and not isinstance(layout_document, dict):
+            raise RuntimeError(
+                f"Missing fluid EPUB layout document {base['id']!r}."
+            )
         source_path = resolve_under(
             text_root,
             source_record.get(text_key),
@@ -592,8 +747,18 @@ def _chapter_records(book_root: Path, input_file: Path) -> list[dict]:
         )
         if source_path is None or not source_path.is_file():
             raise RuntimeError(f"Base chapter is unavailable for {base['id']!r}.")
-        locutor_path = text_root / "locutor" / "chapters" / source_path.name
-        if not locutor_path.is_file():
+        declared_locutor_file = base.get("locutor_file")
+        if declared_locutor_file is not None:
+            locutor_path = resolve_under(
+                text_root,
+                declared_locutor_file,
+                (Path("locutor") / "chapters",),
+            )
+        else:
+            locutor_path = (
+                text_root / "locutor" / "chapters" / source_path.name
+            ).resolve()
+        if locutor_path is None or not locutor_path.is_file():
             raise RuntimeError(f"Locutor chapter is unavailable: {locutor_path}")
         pages = sorted(
             {
@@ -611,6 +776,7 @@ def _chapter_records(book_root: Path, input_file: Path) -> list[dict]:
                 "locutor_path": locutor_path,
                 "logical_pages": pages,
                 "base_ledger_path": ledger_path,
+                "layout_document": layout_document,
             }
         )
     return result
@@ -623,9 +789,14 @@ def build_narration_plan(book_root: Path, input_file: Path, max_chars: int) -> t
     segments: list[dict] = []
     output_lines: list[str] = []
     for chapter in chapters:
-        aligned = _locutor_units(
+        source_text = _source_text_with_layout_joins(
             chapter["source_path"].read_text(encoding="utf-8"),
+            chapter["layout_document"],
+        )
+        aligned = _locutor_units(
+            source_text,
             chapter["locutor_path"].read_text(encoding="utf-8"),
+            allow_collapsed_source_units=True,
         )
         for paragraph_index, (unit, spoken) in enumerate(aligned, start=1):
             for text, pause_kind in _segments_for_unit(unit, spoken, max_chars):
@@ -844,6 +1015,13 @@ def main() -> None:
             input_file.relative_to((book_root / "text" / "locutor").resolve())
         except ValueError:
             raise RuntimeError("Narrator input must remain under text/locutor.")
+        lineage_errors, _lineage = validate_lineage(
+            book_root,
+            book_root / "metadata" / "narrator-changes.json",
+            input_file,
+        )
+        if lineage_errors:
+            raise RuntimeError("; ".join(lineage_errors))
         book_text, plan = build_narration_plan(book_root, input_file, args.max_chars)
         input_file.write_text(book_text, encoding="utf-8")
         plan["input_sha256"] = sha256_file(input_file)

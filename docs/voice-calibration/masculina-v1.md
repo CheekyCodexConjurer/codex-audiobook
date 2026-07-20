@@ -2,8 +2,9 @@
 
 ## Status
 
-`masculina-v1` é o perfil masculino oficial adicional do renderizador local
-`chatterbox-multilingual-v3-pt-br`. Ele não substitui `feminina-v1`.
+`masculina-v1` é o perfil oficial padrão do renderizador local
+`chatterbox-multilingual-v3-pt-br`. `feminina-v1` permanece disponível como
+alternativa explícita aprovada.
 
 A decisão foi concluída em 17 de julho de 2026 após comparação cega dos quatro
 finalistas em narração, diálogo e fala com datas, horários e valores. O registro
@@ -136,4 +137,5 @@ de publicação preservando pitch continua sendo uma etapa de entrega separada.
 
 `--voice-profile` não pode ser combinado com alterações individuais de referência,
 seed ou parâmetros. Isso preserva a identidade calibrada. Sem a opção, o perfil
-feminino existente continua sendo o padrão.
+masculino é o padrão; o perfil feminino existente continua disponível por seleção
+explícita.

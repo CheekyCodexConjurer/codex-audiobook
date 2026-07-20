@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "book_map_sha256": "",
   "text_ledger_sha256": "",
   "source_language": "",
@@ -16,6 +16,31 @@
         "reason": ""
       }
     ]
+  },
+  "translation_quality": {
+    "profile": "faithful-contextual-ptbr-v1",
+    "context_policy": "whole-chapter-with-neighbors-v1",
+    "research_policy": "context-first-evidence-recorded-v1",
+    "brief": {
+      "genre": "",
+      "period": "",
+      "setting": "",
+      "narrator_voice": "",
+      "register": "",
+      "style_goals": "",
+      "names_policy": "",
+      "foreign_fragments_policy": "",
+      "reviewed_by": ""
+    },
+    "glossary": [],
+    "ambiguities": [],
+    "review": {
+      "semantic_fidelity": "pending",
+      "literary_naturalness": "pending",
+      "whole_book_consistency": "pending",
+      "independent": true,
+      "reviewed_by": ""
+    }
   },
   "edition": {
     "book": {

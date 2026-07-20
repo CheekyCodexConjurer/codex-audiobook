@@ -123,7 +123,7 @@ def translation_ledger_for(
         )
 
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "book_map_sha256": sha256_file(book_map_path),
         "text_ledger_sha256": sha256_file(source_ledger_path),
         "source_language": source_language,
@@ -144,6 +144,31 @@ def translation_ledger_for(
                 for source_page in source_ledger["pages"]
                 if source_page["status"] == "verified"
             ],
+        },
+        "translation_quality": {
+            "profile": "faithful-contextual-ptbr-v1",
+            "context_policy": "whole-chapter-with-neighbors-v1",
+            "research_policy": "context-first-evidence-recorded-v1",
+            "brief": {
+                "genre": "Test fixture",
+                "period": "Test fixture",
+                "setting": "Test fixture",
+                "narrator_voice": "Test narrator",
+                "register": "Test register",
+                "style_goals": "Preserve fixture meaning and voice.",
+                "names_policy": "Preserve fixture names.",
+                "foreign_fragments_policy": "Preserve intentional fixture fragments.",
+                "reviewed_by": "codex-verifier",
+            },
+            "glossary": [],
+            "ambiguities": [],
+            "review": {
+                "semantic_fidelity": "approved",
+                "literary_naturalness": "approved",
+                "whole_book_consistency": "approved",
+                "independent": True,
+                "reviewed_by": "codex-verifier",
+            },
         },
         "pages": pages,
         "chapter_outputs": chapter_outputs,
@@ -247,8 +272,11 @@ def main() -> None:
         AUDIO_PROMPT_PER_GENERATE_STRATEGY,
         DEFAULT_MODEL_ROOT,
         DEFAULT_REFERENCE_VOICE,
+        DEFAULT_VOICE_PROFILE,
+        DEFAULT_VOICE_PROFILE_NAME,
         FEMININA_PROFILE,
         FEMININA_PROFILE_CALIBRATION,
+        FEMININA_REFERENCE_VOICE,
         FIXED_PER_SEGMENT_SEED_STRATEGY,
         MASCULINA_PROFILE,
         MASCULINA_PROFILE_CALIBRATION,
@@ -300,6 +328,9 @@ def main() -> None:
     assert MASCULINA_PROFILE["cfg_weight"] == 0.35
     assert MASCULINA_PROFILE["seed"] == 54321
     assert MASCULINA_PROFILE_CALIBRATION["winner_id"] == "seed54321-base"
+    assert DEFAULT_VOICE_PROFILE_NAME == "masculina-v1"
+    assert DEFAULT_VOICE_PROFILE is VOICE_PROFILES[DEFAULT_VOICE_PROFILE_NAME]
+    assert DEFAULT_REFERENCE_VOICE == MASCULINA_REFERENCE_VOICE
     assert (
         VOICE_PROFILES["masculina-v1"]["conditioning_strategy"]
         == AUDIO_PROMPT_PER_GENERATE_STRATEGY
@@ -324,7 +355,7 @@ def main() -> None:
     assert (
         selected_profile(
             profile_args,
-            DEFAULT_REFERENCE_VOICE.resolve(),
+            FEMININA_REFERENCE_VOICE.resolve(),
             DEFAULT_MODEL_ROOT.resolve(),
             "cuda",
             calibrated_model,
@@ -370,7 +401,7 @@ def main() -> None:
     assert (
         selected_profile(
             profile_args,
-            DEFAULT_REFERENCE_VOICE.resolve(),
+            FEMININA_REFERENCE_VOICE.resolve(),
             DEFAULT_MODEL_ROOT.resolve(),
             "cuda",
             calibrated_model,
@@ -436,7 +467,7 @@ def main() -> None:
     assert (
         selected_profile(
             profile_args,
-            DEFAULT_REFERENCE_VOICE.resolve(),
+            FEMININA_REFERENCE_VOICE.resolve(),
             DEFAULT_MODEL_ROOT.resolve(),
             "cpu",
             calibrated_model,
@@ -449,7 +480,7 @@ def main() -> None:
     assert (
         selected_profile(
             profile_args,
-            DEFAULT_REFERENCE_VOICE.resolve(),
+            FEMININA_REFERENCE_VOICE.resolve(),
             DEFAULT_MODEL_ROOT.resolve(),
             "cuda",
             altered_model,
@@ -670,7 +701,8 @@ def main() -> None:
 
             render_chatterbox_module.seed_torch = fake_seed_torch
             render_chatterbox_module.render_segment = fake_render_segment
-            accepted_seed, attempts = render_chatterbox_module.render_segment_with_retries(
+            accepted_seed, attempts, rendered_audio = (
+                render_chatterbox_module.render_segment_with_retries(
                 segment_index=7,
                 model=object(),
                 text=retry_segment.text,
@@ -685,6 +717,7 @@ def main() -> None:
                 top_p=0.0,
                 seed=100,
                 device="cpu",
+                )
             )
         finally:
             render_chatterbox_module.render_segment = original_render_segment
@@ -695,12 +728,14 @@ def main() -> None:
         assert attempts[0]["seed"] == 100
         assert "reason" in attempts[0]
         assert attempts[1]["status"] == "accepted"
+        assert rendered_audio["audio_sha256"] == sha256_file(retry_path)
         render_calls.clear()
         seed_calls.clear()
         try:
             render_chatterbox_module.seed_torch = fake_seed_torch
             render_chatterbox_module.render_segment = fake_render_segment
-            accepted_seed, attempts = render_chatterbox_module.render_segment_with_retries(
+            accepted_seed, attempts, rendered_audio = (
+                render_chatterbox_module.render_segment_with_retries(
                 segment_index=1,
                 model=object(),
                 text=retry_segment.text,
@@ -716,6 +751,7 @@ def main() -> None:
                 seed=100,
                 device="cpu",
                 skip_initial_seed=True,
+                )
             )
         finally:
             render_chatterbox_module.render_segment = original_render_segment
@@ -724,6 +760,7 @@ def main() -> None:
         assert seed_calls == [(accepted_seed, "cpu")]
         assert attempts[0]["status"] == "rejected"
         assert attempts[1]["status"] == "accepted"
+        assert rendered_audio["audio_sha256"] == sha256_file(retry_path)
         retry_record = segment_record(
             7,
             retry_segment,
@@ -1983,6 +2020,7 @@ def main() -> None:
             {"chapter-001": "Fonte EPUB"},
         )
         write_json(epub_translation_ledger_path, epub_translation_ledger)
+        assert epub_translation_ledger["schema_version"] == "1.1"
         run(
             str(ROOT / "verify_translation_ledger.py"),
             "--book-map",
@@ -1993,6 +2031,46 @@ def main() -> None:
             str(epub_translation_ledger_path),
             "--text-root",
             str(epub_text_root),
+        )
+        epub_translated_layout_path = epub_root / "metadata" / "epub-layout.pt-br.json"
+        translated_chapter_output = epub_translation_ledger["chapter_outputs"][0]
+        translated_chapter_file = f"text/{translated_chapter_output['translation_file']}"
+        write_json(
+            epub_translated_layout_path,
+            {
+                "schema_version": "1.0",
+                "text_edition": "translated-pt-br",
+                "book_map_sha256": sha256_file(epub_map),
+                "text_ledger_sha256": sha256_file(epub_ledger_path),
+                "translation_ledger_sha256": sha256_file(epub_translation_ledger_path),
+                "documents": [
+                    {
+                        "id": translated_chapter_output["id"],
+                        "blocks": [
+                            {
+                                "kind": "heading",
+                                "level": 1,
+                                "text_file": translated_chapter_file,
+                                "text_sha256": translated_chapter_output["translation_sha256"],
+                                "block_index": 1,
+                            },
+                            {
+                                "kind": "paragraph",
+                                "text_file": translated_chapter_file,
+                                "text_sha256": translated_chapter_output["translation_sha256"],
+                                "block_index": 2,
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        run(
+            str(ROOT / "validate_epub_layout.py"),
+            "--book-root",
+            str(epub_root),
+            "--text-edition",
+            "translated-pt-br",
         )
         invalid_language_evidence = copy.deepcopy(epub_translation_ledger)
         invalid_language_evidence["translation_decision"]["evidence"][0]["source_sha256"] = "0" * 64
@@ -2006,6 +2084,115 @@ def main() -> None:
             str(epub_ledger_path),
             "--translation-ledger",
             str(invalid_language_evidence_path),
+            "--text-root",
+            str(epub_text_root),
+        )
+        missing_translation_quality = copy.deepcopy(epub_translation_ledger)
+        del missing_translation_quality["translation_quality"]
+        missing_translation_quality_path = (
+            epub_root / "metadata" / "translation-ledger-missing-quality.json"
+        )
+        write_json(missing_translation_quality_path, missing_translation_quality)
+        run_fails(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--translation-ledger",
+            str(missing_translation_quality_path),
+            "--text-root",
+            str(epub_text_root),
+        )
+        unresolved_ambiguity = copy.deepcopy(epub_translation_ledger)
+        first_verified_translation_page = next(
+            page
+            for page in unresolved_ambiguity["pages"]
+            if page["status"] == "verified"
+        )
+        unresolved_ambiguity["translation_quality"]["ambiguities"] = [
+            {
+                "id": "ambiguity-0001",
+                "source_pages": [first_verified_translation_page["logical_page"]],
+                "source_span": "ambiguous source expression",
+                "category": "idiom",
+                "question": "Which contextual sense applies?",
+                "status": "unresolved",
+                "resolution": "",
+                "resolved_by": "",
+                "research": [],
+            }
+        ]
+        unresolved_ambiguity_path = (
+            epub_root / "metadata" / "translation-ledger-unresolved-ambiguity.json"
+        )
+        write_json(unresolved_ambiguity_path, unresolved_ambiguity)
+        run_fails(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--translation-ledger",
+            str(unresolved_ambiguity_path),
+            "--text-root",
+            str(epub_text_root),
+        )
+        resolved_researched_ambiguity = copy.deepcopy(epub_translation_ledger)
+        resolved_researched_ambiguity["translation_quality"]["ambiguities"] = [
+            {
+                "id": "ambiguity-0001",
+                "source_pages": [first_verified_translation_page["logical_page"]],
+                "source_span": "archaic source expression",
+                "category": "archaic",
+                "question": "Which historical sense applies?",
+                "status": "resolved",
+                "resolution": "Use the period-specific sense.",
+                "resolved_by": "codex-verifier",
+                "research": [
+                    {
+                        "source_type": "dictionary",
+                        "reference": "Historical dictionary entry",
+                        "accessed_on": "2026-07-17",
+                        "finding": "The historical sense matches the scene.",
+                    }
+                ],
+            }
+        ]
+        resolved_researched_ambiguity_path = (
+            epub_root / "metadata" / "translation-ledger-resolved-research.json"
+        )
+        write_json(
+            resolved_researched_ambiguity_path,
+            resolved_researched_ambiguity,
+        )
+        run(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--translation-ledger",
+            str(resolved_researched_ambiguity_path),
+            "--text-root",
+            str(epub_text_root),
+        )
+        invalid_research_date = copy.deepcopy(resolved_researched_ambiguity)
+        invalid_research_date["translation_quality"]["ambiguities"][0]["research"][0][
+            "accessed_on"
+        ] = "not-a-date"
+        invalid_research_date_path = (
+            epub_root / "metadata" / "translation-ledger-invalid-research-date.json"
+        )
+        write_json(invalid_research_date_path, invalid_research_date)
+        run_fails(
+            str(ROOT / "verify_translation_ledger.py"),
+            "--book-map",
+            str(epub_map),
+            "--ledger",
+            str(epub_ledger_path),
+            "--translation-ledger",
+            str(invalid_research_date_path),
             "--text-root",
             str(epub_text_root),
         )
@@ -2221,6 +2408,11 @@ def main() -> None:
         assert epub_translated_data["language"] == "pt-BR"
         assert epub_translated_data["source_language"] == "en"
         assert epub_translated_data["translation_ledger_sha256"] == sha256_file(epub_translation_ledger_path)
+        assert epub_translated_data["layout"] == {
+            "mode": "semantic",
+            "path": "metadata/epub-layout.pt-br.json",
+            "sha256": sha256_file(epub_translated_layout_path),
+        }
         assert epub_translated_data["documents"][1]["translation_file"].startswith(
             "text/translation/pt-BR/"
         )
@@ -2258,6 +2450,7 @@ def main() -> None:
         assert translated_sidecar["language"] == "pt-BR"
         assert translated_sidecar["source_language"] == "en"
         assert translated_sidecar["translation_ledger_sha256"] == sha256_file(epub_translation_ledger_path)
+        assert translated_sidecar["layout"] == epub_translated_data["layout"]
         with zipfile.ZipFile(epub_translated_export) as archive:
             translated_chapter_xhtml = archive.read("OEBPS/text/002-chapter-001.xhtml").decode("utf-8")
             assert "Texto traduzido para PT-BR." in translated_chapter_xhtml
@@ -3172,6 +3365,25 @@ def main() -> None:
             "--output",
             str(image_epub_manifest),
         )
+        plain_manifest = json.loads(image_epub_manifest.read_text(encoding="utf-8"))
+        assert "visual_profile" not in plain_manifest
+        run(
+            str(ROOT / "build_epub_manifest.py"),
+            "--book-map",
+            str(image_map_path),
+            "--ledger",
+            str(image_ledger_path),
+            "--assets-manifest",
+            str(image_assets_path),
+            "--text-root",
+            str(image_text_root),
+            "--layout",
+            "legacy",
+            "--visual-profile",
+            "antique-paper",
+            "--output",
+            str(image_epub_manifest),
+        )
         visual_manifest = json.loads(image_epub_manifest.read_text(encoding="utf-8"))
         assert visual_manifest["visual_profile"] == {
             "name": "antique-paper",
@@ -3665,9 +3877,33 @@ def main() -> None:
         revised_sidecar["epub_path"] = revised_epub.relative_to(image_book_root).as_posix()
         revised_sidecar["epub_sha256"] = sha256_file(revised_epub)
         revised_sidecar["text_edition"] = "revised-pt-br"
+        revised_layout_path = image_book_root / "metadata" / "epub-layout.json"
+        write_json(revised_layout_path, {"documents": []})
+        revised_sidecar["layout"] = {
+            "mode": "semantic",
+            "path": "metadata/epub-layout.json",
+            "sha256": sha256_file(revised_layout_path),
+        }
+        revision_ledger_path = image_book_root / "metadata" / "revision-ledger.json"
+        write_json(revision_ledger_path, {"schema_version": "1.0"})
+        revised_sidecar["revision_ledger_sha256"] = sha256_file(revision_ledger_path)
         revised_epub.with_suffix(".epub.json").write_text(
             json.dumps(revised_sidecar, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
+        )
+        revised_manifest = {
+            "text_edition": "revised-pt-br",
+            "language": revised_sidecar["language"],
+            "book_map_sha256": sha256_file(image_book_root / "metadata" / "book-map.json"),
+            "text_ledger_sha256": sha256_file(image_book_root / "metadata" / "text-ledger.json"),
+            "assets_manifest_sha256": sha256_file(image_book_root / "metadata" / "assets-manifest.json"),
+            "revision_ledger_sha256": sha256_file(revision_ledger_path),
+        }
+        if "layout" in revised_sidecar:
+            revised_manifest["layout"] = revised_sidecar["layout"]
+        write_json(
+            image_book_root / "metadata" / "epub-manifest.revised.json",
+            revised_manifest,
         )
         run(
             str(ROOT / "publish_artifacts.py"),
@@ -3843,7 +4079,7 @@ def main() -> None:
             assert chatterbox_manifest["mock"] is False
             assert chatterbox_manifest["render_mode"] == "real"
             assert chatterbox_manifest["engine"] == "chatterbox-multilingual-v3-pt-br"
-            assert chatterbox_manifest["profile"] == "feminina-v1"
+            assert chatterbox_manifest["profile"] == "masculina-v1"
             assert chatterbox_manifest["device"] == "cuda"
             assert chatterbox_manifest["sample_rate"] == 24000
             assert len(chatterbox_manifest["segments"]) == 1
@@ -3870,7 +4106,7 @@ def main() -> None:
             )
             assert (
                 chatterbox_manifest["master_wav_sha256"]
-                == FEMININA_PROFILE_CALIBRATION["main_prompt_wav_sha256"]
+                == MASCULINA_PROFILE_CALIBRATION["main_prompt_wav_sha256"]
             )
             assert (
                 chatterbox_manifest["final_audio_sha256"]
@@ -3905,7 +4141,7 @@ def main() -> None:
                     encoding="utf-8"
                 )
             )
-            assert chatterbox_lineage_manifest["profile"] == "feminina-v1"
+            assert chatterbox_lineage_manifest["profile"] == "masculina-v1"
             assert chatterbox_lineage_manifest["narrator_lineage"]["mode"] == "archaic-modernized"
             assert (
                 chatterbox_lineage_manifest["narrator_lineage"]["output_id"]

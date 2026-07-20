@@ -60,10 +60,16 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         skill_text = skill_path.read_text(encoding="utf-8")
         if not re.match(r"^---\r?\nname:\s*audiobook-codex\r?\ndescription:\s*.+?\r?\n---\r?\n", skill_text, re.DOTALL):
             errors.append("audiobook skill frontmatter is invalid")
+        if "The canonical render profile is `masculina-v1`" not in skill_text:
+            errors.append("audiobook PHASE-2 default must be masculina-v1")
+        if "`feminina-v1` by default" in skill_text:
+            errors.append("audiobook PHASE-2 default must not be feminina-v1")
         for relative_path in (
             "references/artifact-contract.md",
             "references/narrator-policy.md",
             "references/swarm-protocol.md",
+            "references/translation-policy.md",
+            "references/fluid-edition-policy.md",
         ):
             if not (skill_root / relative_path).is_file():
                 errors.append(f"audiobook skill is missing {relative_path}")
@@ -148,9 +154,14 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "validate_book_map.py",
         "validate_book_layout.py",
         "validate_assets_manifest.py",
+        "swarm_claims.py",
+        "validate_claim_map.py",
+        "merge_ledger_shards.py",
+        "assemble_text_outputs.py",
         "verify_text_ledger.py",
         "verify_translation_ledger.py",
         "verify_revision_ledger.py",
+        "verify_fluid_edition_ledger.py",
         "validate_narrator_lineage.py",
         "narrator_quality.py",
         "validate_narrator_quality.py",
@@ -162,8 +173,29 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "epub_presentation.py",
         "export_epub.py",
         "validate_epub_export.py",
+        "export_pdf.py",
+        "validate_pdf_export.py",
+        "export_reader_pair.py",
+        "reader_export_contract.py",
+        "recoverable_file_transaction.py",
+        "test_pdf_export.py",
+        "test_pdf_outline.py",
+        "test_fluid_edition_ledger.py",
+        "test_fluid_exports.py",
+        "test_swarm_workflow.py",
+        "test_claim_scoped_validation.py",
+        "test_audio_pipeline.py",
+        "test_export_validation_efficiency.py",
+        "test_export_idempotence.py",
+        "test_export_cache_contract.py",
+        "test_publication_lineage.py",
+        "test_transaction_recovery.py",
+        "test_translated_reader_flow.py",
         "validate_feminina_profile.py",
+        "validate_masculina_profile.py",
+        "test_voice_profile_validation.py",
         "path_safety.py",
+        "book_transaction_lock.py",
         "audio_tools.py",
         "chapter_audio.py",
         "validate_chapter_audio.py",
@@ -178,9 +210,15 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
     for filename in (
         "book-map.template.json",
         "assets-manifest.template.json",
+        "claim-map.template.json",
         "text-ledger.template.json",
+        "text-ledger-shard.template.json",
         "translation-ledger.template.json",
+        "translation-ledger-shard.template.json",
         "revision-ledger.template.json",
+        "fluid-style.template.json",
+        "fluid-edition-ledger.template.json",
+        "fluid-ledger-shard.template.json",
         "epub-manifest.template.json",
         "epub-layout.template.json",
         "narrator-changes.template.json",
@@ -191,18 +229,44 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
     template_contracts = {
         "book-map.template.json": ("1.0", ("source", "analysis", "pages")),
         "assets-manifest.template.json": ("1.0", ("source_sha256", "assets")),
+        "claim-map.template.json": ("1.0", ("state_model", "claims")),
         "text-ledger.template.json": ("1.0", ("book_map_sha256", "pages")),
-        "translation-ledger.template.json": (
+        "text-ledger-shard.template.json": (
             "1.0",
+            (
+                "shard_kind",
+                "claim_id",
+                "claim_sha256",
+                "producer",
+                "verifier",
+                "order",
+                "text",
+            ),
+        ),
+        "translation-ledger.template.json": (
+            "1.1",
             (
                 "book_map_sha256",
                 "text_ledger_sha256",
                 "source_language",
                 "target_language",
                 "translation_decision",
+                "translation_quality",
                 "edition",
                 "pages",
                 "chapter_outputs",
+            ),
+        ),
+        "translation-ledger-shard.template.json": (
+            "1.0",
+            (
+                "shard_kind",
+                "claim_id",
+                "claim_sha256",
+                "producer",
+                "verifier",
+                "order",
+                "translation",
             ),
         ),
         "revision-ledger.template.json": (
@@ -215,6 +279,48 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
                 "reviewed_by",
                 "changes",
                 "chapter_outputs",
+            ),
+        ),
+        "fluid-style.template.json": (
+            "1.2",
+            (
+                "profile",
+                "language",
+                "base_edition",
+                "voice",
+                "rules",
+                "glossary",
+                "reviewed_by",
+            ),
+        ),
+        "fluid-edition-ledger.template.json": (
+            "1.2",
+            (
+                "book_map_sha256",
+                "text_ledger_sha256",
+                "base_edition",
+                "base_ledger_sha256",
+                "fluid_style_sha256",
+                "language",
+                "profile",
+                "edited_by",
+                "edition",
+                "review",
+                "chapter_outputs",
+                "blocks",
+                "book_output",
+            ),
+        ),
+        "fluid-ledger-shard.template.json": (
+            "1.0",
+            (
+                "shard_kind",
+                "claim_id",
+                "claim_sha256",
+                "producer",
+                "verifier",
+                "order",
+                "fluid",
             ),
         ),
         "epub-manifest.template.json": (
@@ -275,10 +381,18 @@ def validate(plugin_root: Path, marketplace_path: Path | None) -> list[str]:
         "fonts/im-fell-english/OFL.txt",
         "voices/Feminina.mp3",
         "voices/feminina-v1.promotion.json",
+        "voices/Masculina.mp3",
+        "voices/masculina-v1.promotion.json",
     ):
         if not (plugin_root / "assets" / filename).is_file():
             errors.append(f"plugin is missing assets/{filename}")
     promotion_path = plugin_root / "assets" / "voices" / "feminina-v1.promotion.json"
+    if promotion_path.is_file():
+        try:
+            load_json(promotion_path)
+        except RuntimeError as error:
+            errors.append(str(error))
+    promotion_path = plugin_root / "assets" / "voices" / "masculina-v1.promotion.json"
     if promotion_path.is_file():
         try:
             load_json(promotion_path)

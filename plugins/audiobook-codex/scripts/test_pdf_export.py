@@ -7,7 +7,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
+from types import SimpleNamespace
 
 from pypdf import PdfReader, PdfWriter
 
@@ -16,10 +18,18 @@ from export_pdf import (
     DIALOGUE_LEFT_INDENT_MM,
     FOOTNOTE_FONT_SIZE,
     FOOTNOTE_SEPARATOR_WIDTH_MM,
+    QUOTATION_INDENT_MM,
     _dialogue_paragraph_style,
     _footnote_paragraph_style,
+    _quotation_paragraph_style,
     _require_reportlab,
+    _url_paragraph_style,
     _verse_paragraph_style,
+)
+from export_epub import document_markup, heading_markup, paragraphs_from_text
+from validate_pdf_export import (
+    _without_pdf_page_number,
+    validate_legacy_heading_uniqueness,
 )
 
 
@@ -99,10 +109,11 @@ def build_semantic_pdf_fixture(book_root: Path) -> Path:
         [
             "CAPÍTULO DE TESTE",
             "Texto fiel preservado com acentos, orixás e coração para validação semântica do PDF.",
+            "Citação destacada preservada com recuo bilateral no PDF.",
             "— Fala direta preservada no PDF sem achatamento indevido.",
             "Primeiro verso curto",
             "Segundo verso curto",
-            "Referência anotada2",
+            "Referência anotada (AUTOR, 1900, p. 12).2",
             "2 Nota validada no PDF.",
             "Texto posterior à chamada continua acima do rodapé.",
         ]
@@ -111,9 +122,10 @@ def build_semantic_pdf_fixture(book_root: Path) -> Path:
     chapter_path.write_text(
         "CAPÍTULO DE TESTE\n\n"
         "Texto fiel preservado com acentos, orixás e coração para validação semântica do PDF.\n\n"
+        "Citação destacada preservada com recuo bilateral no PDF.\n\n"
         "— Fala direta preservada no PDF sem achatamento indevido.\n\n"
         "Primeiro verso curto\nSegundo verso curto\n\n"
-        "Referência anotada2\n2 Nota validada no PDF.\n"
+        "Referência anotada (AUTOR, 1900, p. 12).2\n2 Nota validada no PDF.\n"
         "Texto posterior à chamada continua acima do rodapé.\n",
         encoding="utf-8",
     )
@@ -231,16 +243,17 @@ def build_semantic_pdf_fixture(book_root: Path) -> Path:
                 "blocks": [
                     {"kind": "heading", "level": 1, "spans": [span(page_sha256, 1, 1)]},
                     {"kind": "paragraph", "spans": [span(page_sha256, 2, 2)]},
-                    {"kind": "dialogue", "spans": [span(page_sha256, 3, 3)]},
-                    {"kind": "verse", "spans": [span(page_sha256, 4, 5)]},
-                    {"kind": "paragraph", "spans": [span(page_sha256, 6, 6)]},
+                    {"kind": "quotation", "spans": [span(page_sha256, 3, 3)]},
+                    {"kind": "dialogue", "spans": [span(page_sha256, 4, 4)]},
+                    {"kind": "verse", "spans": [span(page_sha256, 5, 6)]},
+                    {"kind": "paragraph", "spans": [span(page_sha256, 7, 7)]},
                     {
                         "kind": "note",
                         "id": "note-2",
                         "marker": "2",
-                        "spans": [span(page_sha256, 7, 7)],
+                        "spans": [span(page_sha256, 8, 8)],
                     },
-                    {"kind": "paragraph", "spans": [span(page_sha256, 8, 8)]},
+                    {"kind": "paragraph", "spans": [span(page_sha256, 9, 9)]},
                 ],
             }
         ],
@@ -379,6 +392,26 @@ def test_pdf_dialogue_style_contract() -> None:
     )
 
 
+def test_pdf_quotation_style_contract() -> None:
+    rl = _require_reportlab()
+    ParagraphStyle = rl["ParagraphStyle"]
+    TA_JUSTIFY = rl["TA_JUSTIFY"]
+    getSampleStyleSheet = rl["getSampleStyleSheet"]
+    mm = rl["mm"]
+
+    quotation = _quotation_paragraph_style(
+        ParagraphStyle,
+        getSampleStyleSheet()["BodyText"],
+        mm,
+        TA_JUSTIFY,
+    )
+
+    assert quotation.alignment == TA_JUSTIFY
+    assert_points_close(quotation.leftIndent, QUOTATION_INDENT_MM * mm)
+    assert_points_close(quotation.rightIndent, QUOTATION_INDENT_MM * mm)
+    assert quotation.firstLineIndent == 0
+
+
 def test_pdf_verse_style_contract() -> None:
     rl = _require_reportlab()
     ParagraphStyle = rl["ParagraphStyle"]
@@ -415,6 +448,201 @@ def test_pdf_footnote_style_contract() -> None:
     assert note.alignment == TA_LEFT
     assert note.firstLineIndent == 0
     assert note.borderWidth == 0
+
+
+def test_pdf_url_style_wraps_long_urls() -> None:
+    rl = _require_reportlab()
+    Paragraph = rl["Paragraph"]
+    ParagraphStyle = rl["ParagraphStyle"]
+    style = _url_paragraph_style(
+        ParagraphStyle,
+        rl["getSampleStyleSheet"]()["BodyText"],
+        rl["TA_LEFT"],
+    )
+    paragraph = Paragraph(
+        "https://example.com/a-very-long-path-that-must-wrap-without-clipping/"
+        "another-long-segment/and-another-long-segment",
+        style,
+    )
+    _width, height = paragraph.wrap(180, 800)
+    assert height > style.leading
+
+
+def test_legacy_chapter_heading_absorbs_leading_number_block() -> None:
+    heading, paragraphs = paragraphs_from_text(
+        "UM\n\nO QUE SÃO RESULTADOS?\n\nTexto do capítulo.",
+        "O que são resultados?",
+        allow_leading_chapter_label=True,
+    )
+    assert heading == "UM\nO QUE SÃO RESULTADOS?"
+    assert paragraphs == ["Texto do capítulo."]
+    assert heading_markup(heading) == "UM<br/>O QUE SÃO RESULTADOS?"
+
+
+def test_legacy_chapter_heading_preserves_non_number_kicker() -> None:
+    heading, paragraphs = paragraphs_from_text(
+        "UMA BREVE EPÍGRAFE\n\nO QUE SÃO RESULTADOS?\n\nTexto do capítulo.",
+        "O que são resultados?",
+        allow_leading_chapter_label=True,
+    )
+    assert heading == "O que são resultados?"
+    assert paragraphs == [
+        "UMA BREVE EPÍGRAFE",
+        "Texto do capítulo.",
+    ]
+
+
+def test_legacy_chapter_heading_rejects_ambiguous_labels_and_substrings() -> None:
+    for ambiguous_label in (
+        "CIVIL",
+        "MIX",
+        "0",
+        "0001",
+        "201",
+        "CCI",
+        "Chapter 0000",
+        "Chapter 201",
+        "Capítulo CCI",
+    ):
+        heading, paragraphs = paragraphs_from_text(
+            f"{ambiguous_label}\n\nO QUE SÃO RESULTADOS?\n\nTexto do capítulo.",
+            "O que são resultados?",
+            allow_leading_chapter_label=True,
+        )
+        assert heading == "O que são resultados?"
+        assert paragraphs == [ambiguous_label, "Texto do capítulo."]
+
+    heading, paragraphs = paragraphs_from_text(
+        "UM\n\nNeste capítulo, O QUE SÃO RESULTADOS? é discutido.\n\nTexto.",
+        "O que são resultados?",
+        allow_leading_chapter_label=True,
+    )
+    assert heading == "O que são resultados?"
+    assert paragraphs == [
+        "UM",
+        "Neste capítulo, O QUE SÃO RESULTADOS? é discutido.",
+        "Texto.",
+    ]
+
+    for accepted_label in ("1", "200", "I", "CC", "Chapter 1", "Capítulo CC"):
+        heading, paragraphs = paragraphs_from_text(
+            f"{accepted_label}\n\nO QUE SÃO RESULTADOS?\n\nTexto.",
+            "O que são resultados?",
+            allow_leading_chapter_label=True,
+        )
+        assert heading == f"{accepted_label}\nO QUE SÃO RESULTADOS?"
+        assert paragraphs == ["Texto."]
+
+
+def test_legacy_chapter_heading_matches_unicode_equivalent_titles() -> None:
+    canonical_title = "Capítulo Único"
+    decomposed_title = unicodedata.normalize("NFD", canonical_title).upper()
+    heading, paragraphs = paragraphs_from_text(
+        f"UM\n\n{decomposed_title}\n\nTexto.",
+        canonical_title,
+        allow_leading_chapter_label=True,
+    )
+    assert heading == f"UM\n{decomposed_title}"
+    assert paragraphs == ["Texto."]
+
+
+def test_legacy_epub_chapter_markup_has_one_structural_title() -> None:
+    with tempfile.TemporaryDirectory(prefix="audiobook-legacy-heading-") as raw_root:
+        book_root = Path(raw_root)
+        chapter_path = book_root / "chapter.txt"
+        chapter_path.write_text(
+            "UM\n\nO QUE SÃO RESULTADOS?\n\nTexto do capítulo.",
+            encoding="utf-8",
+        )
+        markup = document_markup(
+            {
+                "id": "chapter-01",
+                "kind": "chapter",
+                "title": "O que são resultados?",
+                "_text_path": chapter_path,
+                "_layout_blocks": None,
+            },
+            "pt-BR",
+            [],
+            book_root,
+        )
+        assert "<h1>UM<br/>O QUE SÃO RESULTADOS?</h1>" in markup
+        assert markup.count("O QUE SÃO RESULTADOS?") == 1
+        assert "<p>Texto do capítulo.</p>" in markup
+
+
+def test_pdf_validator_rejects_duplicate_legacy_heading() -> None:
+    with tempfile.TemporaryDirectory(prefix="audiobook-pdf-heading-validator-") as raw_root:
+        source_path = Path(raw_root) / "chapter.txt"
+        source_path.write_text(
+            "UM\n\nO QUE SÃO RESULTADOS?\n\nTexto.",
+            encoding="utf-8",
+        )
+        outline_item = SimpleNamespace(title="O que são resultados?")
+        document = {
+            "kind": "chapter",
+            "title": "O que são resultados?",
+            "_layout_blocks": None,
+            "_text_path": source_path,
+        }
+
+        def reader_for(text: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                outline=[SimpleNamespace(title="Sumário"), outline_item],
+                pages=[SimpleNamespace(extract_text=lambda: text)],
+                get_destination_page_number=lambda _item: 0,
+            )
+
+        assert validate_legacy_heading_uniqueness(
+            reader_for("UM\nO QUE SÃO RESULTADOS?\nTexto."),
+            [document],
+        ) == []
+        assert validate_legacy_heading_uniqueness(
+            reader_for(
+                "O que são resultados?\nUM\nO QUE SÃO RESULTADOS?\nTexto."
+            ),
+            [document],
+        ) == [
+            "PDF legacy chapter heading does not match the content at its "
+            "outline destination: O que são resultados?"
+        ]
+        assert validate_legacy_heading_uniqueness(
+            reader_for(
+                "UM\nO QUE SÃO RESULTADOS?\n"
+                "Neste capítulo, explicamos o que são resultados? com exemplos."
+            ),
+            [document],
+        ) == []
+
+
+def test_pdf_page_number_cleanup_preserves_numeric_chapter_label() -> None:
+    assert _without_pdf_page_number("9\n1\nTÍTULO", 9) == "1\nTÍTULO"
+    assert _without_pdf_page_number("1\nTÍTULO\n9", 9) == "1\nTÍTULO"
+
+    with tempfile.TemporaryDirectory(prefix="audiobook-numeric-heading-validator-") as raw_root:
+        source_path = Path(raw_root) / "chapter.txt"
+        source_path.write_text("1\n\nTÍTULO\n\nTexto.", encoding="utf-8")
+        pages = [SimpleNamespace(extract_text=lambda: "") for _ in range(8)]
+        pages.append(SimpleNamespace(extract_text=lambda: "9\n1\nTÍTULO\nTexto."))
+        reader = SimpleNamespace(
+            outline=[
+                SimpleNamespace(title="Sumário"),
+                SimpleNamespace(title="Título"),
+            ],
+            pages=pages,
+            get_destination_page_number=lambda _item: 8,
+        )
+        assert validate_legacy_heading_uniqueness(
+            reader,
+            [
+                {
+                    "kind": "chapter",
+                    "title": "Título",
+                    "_layout_blocks": None,
+                    "_text_path": source_path,
+                }
+            ],
+        ) == []
 
 
 def test_original_semantic_pdf_export_and_validation() -> None:
@@ -458,9 +686,10 @@ def test_original_semantic_pdf_export_and_validation() -> None:
         assert str(reader.metadata.title) == "PDF de Teste"
         titles = outline_titles(reader.outline)
         assert "Sumário" in titles
-        assert "CAPÍTULO DE TESTE" in titles
+        assert "Capítulo de Teste" in titles
         observations = pdf_text_observations(reader)
         paragraph = observation_containing(observations, "Texto fiel preservado")
+        quotation = observation_containing(observations, "Citação destacada preservada")
         dialogue = observation_containing(observations, "Fala direta preservada")
         note_reference = observation_containing(observations, "Referência anotada")
         footnote = observation_containing(observations, "Nota validada no PDF")
@@ -468,6 +697,7 @@ def test_original_semantic_pdf_export_and_validation() -> None:
             observations,
             "Texto posterior à chamada",
         )
+        assert float(quotation["x"]) - float(paragraph["x"]) > 5 * _require_reportlab()["mm"]
         assert "Italic" in str(dialogue["font"])
         assert float(dialogue["x"]) - float(paragraph["x"]) > 5 * _require_reportlab()["mm"]
         assert footnote["page"] == note_reference["page"]
@@ -550,8 +780,17 @@ def test_original_semantic_pdf_export_and_validation() -> None:
 
 def run_tests() -> None:
     test_pdf_dialogue_style_contract()
+    test_pdf_quotation_style_contract()
     test_pdf_verse_style_contract()
     test_pdf_footnote_style_contract()
+    test_pdf_url_style_wraps_long_urls()
+    test_legacy_chapter_heading_absorbs_leading_number_block()
+    test_legacy_chapter_heading_preserves_non_number_kicker()
+    test_legacy_chapter_heading_rejects_ambiguous_labels_and_substrings()
+    test_legacy_chapter_heading_matches_unicode_equivalent_titles()
+    test_legacy_epub_chapter_markup_has_one_structural_title()
+    test_pdf_validator_rejects_duplicate_legacy_heading()
+    test_pdf_page_number_cleanup_preserves_numeric_chapter_label()
     test_original_semantic_pdf_export_and_validation()
 
 

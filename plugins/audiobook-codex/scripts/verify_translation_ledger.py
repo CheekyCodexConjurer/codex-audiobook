@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -9,8 +10,13 @@ import sys
 from path_safety import resolve_under
 from verify_text_ledger import (
     chapter_output_records,
+    claim_owned_logical_pages,
     expected_chapter_outputs,
     page_requires_text,
+    validate_claim_context,
+    validate_claim_file_target,
+    validate_exact_page_coverage,
+    validate_record_scope,
     verify as verify_text_ledger,
 )
 
@@ -18,6 +24,48 @@ from verify_text_ledger import (
 TRANSLATION_STATES = {"verified", "blank", "excluded"}
 TARGET_LANGUAGE = "pt-BR"
 TRANSLATION_ROOT = Path("translation") / TARGET_LANGUAGE
+TRANSLATION_SCHEMA_VERSION = "1.1"
+TRANSLATION_PROFILE = "faithful-contextual-ptbr-v1"
+CONTEXT_POLICY = "whole-chapter-with-neighbors-v1"
+RESEARCH_POLICY = "context-first-evidence-recorded-v1"
+AMBIGUITY_STATES = {"resolved", "needs-review", "unresolved"}
+AMBIGUITY_CATEGORIES = {
+    "idiom",
+    "archaic",
+    "historical",
+    "cultural",
+    "technical",
+    "dialect",
+    "proper-name",
+    "title",
+    "institution",
+    "wordplay",
+    "other",
+}
+RESEARCH_SOURCE_TYPES = {
+    "book-context",
+    "dictionary",
+    "primary",
+    "official",
+    "scholarly",
+    "other",
+}
+BRIEF_FIELDS = (
+    "genre",
+    "period",
+    "setting",
+    "narrator_voice",
+    "register",
+    "style_goals",
+    "names_policy",
+    "foreign_fragments_policy",
+    "reviewed_by",
+)
+TRANSLATION_REVIEW_FIELDS = (
+    "semantic_fidelity",
+    "literary_naturalness",
+    "whole_book_consistency",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -92,6 +140,15 @@ def _expected_verified_pages(book_map: dict) -> set[int]:
         and isinstance(page.get("logical_page"), int)
         and page_requires_text(page)
     }
+
+
+def _translation_record_sections(payload: dict) -> tuple[list, list, list, list]:
+    return (
+        payload.get("pages") if isinstance(payload.get("pages"), list) else [],
+        payload.get("chapter_outputs") if isinstance(payload.get("chapter_outputs"), list) else [],
+        payload.get("glossary_proposals") if isinstance(payload.get("glossary_proposals"), list) else [],
+        payload.get("ambiguities") if isinstance(payload.get("ambiguities"), list) else [],
+    )
 
 
 def _validate_translation_pages(
@@ -191,6 +248,7 @@ def _validate_translation_outputs(
     errors: list[str] = []
     expected_outputs, expected_errors = expected_chapter_outputs(book_map, text_root)
     errors += expected_errors
+    source_by_page = _source_pages_by_number(source_ledger)
     source_outputs = chapter_output_records(source_ledger)
     outputs = translation_ledger.get("chapter_outputs")
     if not isinstance(outputs, list) or not outputs:
@@ -261,6 +319,12 @@ def _validate_translation_outputs(
                     errors.append(f"{page_label}.logical_page is duplicated")
                     continue
                 seen_pages.add(logical_page)
+                source_page = source_by_page.get(logical_page)
+                if not isinstance(source_page, dict) or source_page.get("status") != "verified":
+                    errors.append(f"{page_label}.logical_page must reference a verified source ledger page")
+                    continue
+                if page.get("source_sha256") != source_page.get("source_sha256"):
+                    errors.append(f"{page_label}.source_sha256 does not match its verified source page")
                 if page.get("source_sha256") != expected_page_hashes.get(logical_page):
                     errors.append(f"{page_label}.source_sha256 does not match its source page")
                 prior_output = all_pages.get(logical_page)
@@ -405,6 +469,159 @@ def _validate_translation_decision(
     return errors
 
 
+def _validate_translation_quality(
+    source_ledger: dict,
+    translation_ledger: dict,
+) -> list[str]:
+    errors: list[str] = []
+    quality = translation_ledger.get("translation_quality")
+    if not isinstance(quality, dict):
+        return ["translation ledger.translation_quality must be an object"]
+
+    if quality.get("profile") != TRANSLATION_PROFILE:
+        errors.append(f"translation quality profile must be {TRANSLATION_PROFILE}")
+    if quality.get("context_policy") != CONTEXT_POLICY:
+        errors.append(f"translation quality context_policy must be {CONTEXT_POLICY}")
+    if quality.get("research_policy") != RESEARCH_POLICY:
+        errors.append(f"translation quality research_policy must be {RESEARCH_POLICY}")
+
+    brief = quality.get("brief")
+    if not isinstance(brief, dict):
+        errors.append("translation quality brief must be an object")
+    else:
+        for field in BRIEF_FIELDS:
+            if not require_text(brief.get(field)):
+                errors.append(f"translation quality brief.{field} must be non-empty")
+
+    glossary = quality.get("glossary")
+    if not isinstance(glossary, list):
+        errors.append("translation quality glossary must be an array")
+    else:
+        seen_terms: set[str] = set()
+        for index, entry in enumerate(glossary):
+            label = f"translation quality glossary[{index}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{label} must be an object")
+                continue
+            source_term = entry.get("source_term")
+            if not require_text(source_term):
+                errors.append(f"{label}.source_term must be non-empty")
+            else:
+                normalized_term = source_term.strip().casefold()
+                if normalized_term in seen_terms:
+                    errors.append(f"{label}.source_term is duplicated: {source_term.strip()}")
+                seen_terms.add(normalized_term)
+            for field in ("target_term", "reason", "reviewed_by"):
+                if not require_text(entry.get(field)):
+                    errors.append(f"{label}.{field} must be non-empty")
+            if entry.get("status") != "approved":
+                errors.append(f"{label}.status must be approved")
+
+    verified_pages = {
+        logical_page
+        for logical_page, entry in _source_pages_by_number(source_ledger).items()
+        if entry.get("status") == "verified"
+    }
+    ambiguities = quality.get("ambiguities")
+    if not isinstance(ambiguities, list):
+        errors.append("translation quality ambiguities must be an array")
+    else:
+        seen_ids: set[str] = set()
+        for index, entry in enumerate(ambiguities):
+            label = f"translation quality ambiguities[{index}]"
+            if not isinstance(entry, dict):
+                errors.append(f"{label} must be an object")
+                continue
+
+            ambiguity_id = entry.get("id")
+            if not require_text(ambiguity_id):
+                errors.append(f"{label}.id must be non-empty")
+            else:
+                ambiguity_id = ambiguity_id.strip()
+                if ambiguity_id in seen_ids:
+                    errors.append(f"{label}.id is duplicated: {ambiguity_id}")
+                seen_ids.add(ambiguity_id)
+
+            source_pages = entry.get("source_pages")
+            if not isinstance(source_pages, list) or not source_pages:
+                errors.append(f"{label}.source_pages must be a non-empty array")
+            else:
+                seen_pages: set[int] = set()
+                for page_index, logical_page in enumerate(source_pages):
+                    page_label = f"{label}.source_pages[{page_index}]"
+                    if (
+                        not isinstance(logical_page, int)
+                        or isinstance(logical_page, bool)
+                        or logical_page <= 0
+                    ):
+                        errors.append(f"{page_label} must be a positive integer")
+                        continue
+                    if logical_page in seen_pages:
+                        errors.append(f"{page_label} is duplicated: {logical_page}")
+                    seen_pages.add(logical_page)
+                    if logical_page not in verified_pages:
+                        errors.append(f"{page_label} must reference a verified source page")
+
+            for field in ("source_span", "question"):
+                if not require_text(entry.get(field)):
+                    errors.append(f"{label}.{field} must be non-empty")
+            category = entry.get("category")
+            if category not in AMBIGUITY_CATEGORIES:
+                errors.append(f"{label}.category has invalid value: {category!r}")
+            status = entry.get("status")
+            if status not in AMBIGUITY_STATES:
+                errors.append(f"{label}.status has invalid value: {status!r}")
+            elif status != "resolved":
+                errors.append(f"{label} must be resolved before translation approval")
+            if status == "resolved":
+                for field in ("resolution", "resolved_by"):
+                    if not require_text(entry.get(field)):
+                        errors.append(f"{label}.{field} must be non-empty")
+
+            research = entry.get("research")
+            if not isinstance(research, list):
+                errors.append(f"{label}.research must be an array")
+            else:
+                for research_index, evidence in enumerate(research):
+                    evidence_label = f"{label}.research[{research_index}]"
+                    if not isinstance(evidence, dict):
+                        errors.append(f"{evidence_label} must be an object")
+                        continue
+                    source_type = evidence.get("source_type")
+                    if source_type not in RESEARCH_SOURCE_TYPES:
+                        errors.append(
+                            f"{evidence_label}.source_type has invalid value: {source_type!r}"
+                        )
+                    for field in ("reference", "finding"):
+                        if not require_text(evidence.get(field)):
+                            errors.append(f"{evidence_label}.{field} must be non-empty")
+                    if source_type != "book-context":
+                        accessed_on = evidence.get("accessed_on")
+                        if not require_text(accessed_on):
+                            errors.append(f"{evidence_label}.accessed_on must be non-empty")
+                        else:
+                            try:
+                                date.fromisoformat(accessed_on.strip())
+                            except ValueError:
+                                errors.append(
+                                    f"{evidence_label}.accessed_on must use YYYY-MM-DD"
+                                )
+
+    review = quality.get("review")
+    if not isinstance(review, dict):
+        errors.append("translation quality review must be an object")
+    else:
+        for field in TRANSLATION_REVIEW_FIELDS:
+            if review.get(field) != "approved":
+                errors.append(f"translation quality review.{field} must be approved")
+        if review.get("independent") is not True:
+            errors.append("translation quality review.independent must be true")
+        if not require_text(review.get("reviewed_by")):
+            errors.append("translation quality review.reviewed_by must be non-empty")
+
+    return errors
+
+
 def verify(
     book_map: object,
     book_map_sha256: str,
@@ -429,8 +646,10 @@ def verify(
         False,
         True,
     )
-    if translation_ledger.get("schema_version") != "1.0":
-        errors.append("translation ledger schema_version must be '1.0'")
+    if translation_ledger.get("schema_version") != TRANSLATION_SCHEMA_VERSION:
+        errors.append(
+            f"translation ledger schema_version must be {TRANSLATION_SCHEMA_VERSION!r}"
+        )
     if translation_ledger.get("book_map_sha256") != book_map_sha256:
         errors.append("translation ledger.book_map_sha256 does not match book-map.json")
     if translation_ledger.get("text_ledger_sha256") != source_ledger_sha256:
@@ -449,6 +668,7 @@ def verify(
     if translation_ledger.get("target_language") != TARGET_LANGUAGE:
         errors.append(f"translation ledger.target_language must be {TARGET_LANGUAGE}")
     errors += _validate_translation_decision(book_map, source_ledger, translation_ledger, text_root)
+    errors += _validate_translation_quality(source_ledger, translation_ledger)
     errors += _validate_translation_pages(book_map, source_ledger, translation_ledger, text_root)
     errors += _validate_translation_outputs(book_map, source_ledger, translation_ledger, text_root)
     expected_outputs, expected_errors = expected_chapter_outputs(book_map, text_root)
@@ -457,27 +677,276 @@ def verify(
     return errors
 
 
+def verify_claim(
+    book_map: object,
+    book_map_sha256: str,
+    source_ledger: object,
+    source_ledger_sha256: str,
+    shard: object,
+    claim_map: object,
+    claim_id: str,
+    text_root: Path,
+    shard_path: Path | None = None,
+) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(book_map, dict):
+        return ["book map must be an object"]
+    if not isinstance(source_ledger, dict):
+        return ["source text ledger must be an object"]
+    if source_ledger.get("book_map_sha256") != book_map_sha256:
+        errors.append("source text ledger.book_map_sha256 does not match book-map.json")
+    claim, context_errors = validate_claim_context(
+        claim_map,
+        claim_id,
+        shard,
+        kind="translation",
+        text_root=text_root,
+        shard_path=shard_path,
+    )
+    errors += context_errors
+    if not isinstance(shard, dict):
+        return errors
+    payload = shard.get("translation")
+    if not isinstance(payload, dict):
+        return errors + ["shard.translation must be an object"]
+    if claim is None:
+        return errors
+
+    owned_pages = claim_owned_logical_pages(book_map, claim)
+    source_by_page = _source_pages_by_number(source_ledger)
+    source_outputs = chapter_output_records(source_ledger)
+    mapped_pages = {
+        page["logical_page"]
+        for page in book_map.get("pages", [])
+        if isinstance(page, dict)
+        and isinstance(page.get("logical_page"), int)
+        and not isinstance(page.get("logical_page"), bool)
+    }
+    pages, outputs, glossary_proposals, ambiguities = _translation_record_sections(payload)
+
+    translation_by_page: dict[int, dict] = {}
+    for index, entry in enumerate(pages):
+        label = f"shard.translation.pages[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        errors += validate_record_scope(claim, "pages", entry, label=label, book_map=book_map)
+        logical_page = entry.get("logical_page")
+        if not isinstance(logical_page, int) or isinstance(logical_page, bool) or logical_page <= 0:
+            errors.append(f"{label}.logical_page must be positive")
+            continue
+        if logical_page in translation_by_page:
+            errors.append(f"{label}.logical_page is duplicated: {logical_page}")
+            continue
+        translation_by_page[logical_page] = entry
+        if logical_page not in mapped_pages:
+            errors.append(f"{label}.logical_page is not mapped by book-map.json")
+            continue
+        source_entry = source_by_page.get(logical_page)
+        if not isinstance(source_entry, dict):
+            errors.append(f"{label}.logical_page has no matching source ledger page")
+            continue
+        status = entry.get("status")
+        if status not in TRANSLATION_STATES:
+            errors.append(f"translation ledger logical page {logical_page} has invalid status: {status!r}")
+            continue
+        if status != source_entry.get("status"):
+            errors.append(f"translation ledger logical page {logical_page} status must match the verified source ledger")
+            continue
+        if status != "verified":
+            if not require_text(entry.get("notes")):
+                errors.append(f"translation ledger logical page {logical_page} needs notes for status {status}")
+            continue
+        if entry.get("source_file") != source_entry.get("source_file"):
+            errors.append(f"translation ledger logical page {logical_page}.source_file does not match the source ledger")
+        if entry.get("source_sha256") != source_entry.get("source_sha256"):
+            errors.append(f"translation ledger logical page {logical_page}.source_sha256 does not match the source ledger")
+        translation_file = entry.get("translation_file")
+        errors += validate_claim_file_target(
+            claim,
+            translation_file,
+            label=f"{label}.translation_file",
+        )
+        translation_path = resolve_under(
+            text_root,
+            translation_file,
+            (TRANSLATION_ROOT / "pages",),
+        )
+        if translation_path is None:
+            errors.append(f"translation ledger logical page {logical_page}.translation_file must resolve under {TRANSLATION_ROOT}/pages")
+        elif not translation_path.is_file() or not translation_path.read_text(encoding="utf-8").strip():
+            errors.append(f"translation ledger logical page {logical_page}.translation_file is missing or empty")
+        elif entry.get("translation_sha256") != sha256_file(translation_path):
+            errors.append(f"translation ledger logical page {logical_page}.translation_sha256 does not match translation_file")
+        if not require_text(entry.get("translated_by")):
+            errors.append(f"translation ledger logical page {logical_page}.translated_by must be non-empty")
+        if not require_text(entry.get("reviewed_by")):
+            errors.append(f"translation ledger logical page {logical_page}.reviewed_by must be non-empty")
+    errors += validate_exact_page_coverage(
+        owned_pages,
+        set(translation_by_page),
+        label="shard.translation.pages",
+    )
+
+    by_id: dict[str, dict] = {}
+    all_pages: dict[int, str] = {}
+    for index, entry in enumerate(outputs):
+        label = f"shard.translation.chapter_outputs[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        errors += validate_record_scope(claim, "chapter_outputs", entry, label=label, book_map=book_map)
+        output_id = entry.get("id")
+        if not require_text(output_id):
+            errors.append(f"{label}.id must be non-empty")
+            continue
+        output_id = output_id.strip()
+        if output_id in by_id:
+            errors.append(f"{label}.id is duplicated: {output_id}")
+            continue
+        by_id[output_id] = entry
+        source_output = source_outputs.get(output_id)
+        if not isinstance(source_output, dict):
+            errors.append(f"{label}.id has no matching source chapter output")
+            continue
+        if entry.get("source_file") != source_output.get("source_file"):
+            errors.append(f"{label}.source_file does not match the source chapter output")
+        if entry.get("source_sha256") != source_output.get("source_sha256"):
+            errors.append(f"{label}.source_sha256 does not match the source chapter output")
+        translation_file = entry.get("translation_file")
+        errors += validate_claim_file_target(
+            claim,
+            translation_file,
+            label=f"{label}.translation_file",
+        )
+        translation_path = resolve_under(
+            text_root,
+            translation_file,
+            (TRANSLATION_ROOT / "chapters", TRANSLATION_ROOT / "book.txt"),
+        )
+        if translation_path is None:
+            errors.append(
+                f"{label}.translation_file must resolve under {TRANSLATION_ROOT}/chapters or "
+                f"{TRANSLATION_ROOT}/book.txt"
+            )
+        elif not translation_path.is_file() or not translation_path.read_text(encoding="utf-8").strip():
+            errors.append(f"{label}.translation_file is missing or empty")
+        elif entry.get("translation_sha256") != sha256_file(translation_path):
+            errors.append(f"{label}.translation_sha256 does not match translation_file")
+        source_pages = entry.get("source_pages")
+        if not isinstance(source_pages, list) or not source_pages:
+            errors.append(f"{label}.source_pages must be a non-empty array")
+        else:
+            expected_pages = source_output.get("source_pages")
+            expected_page_hashes = {
+                page.get("logical_page"): page.get("source_sha256")
+                for page in expected_pages
+                if isinstance(page, dict) and isinstance(page.get("logical_page"), int)
+            } if isinstance(expected_pages, list) else {}
+            seen_pages: set[int] = set()
+            for page_index, page in enumerate(source_pages):
+                page_label = f"{label}.source_pages[{page_index}]"
+                if not isinstance(page, dict):
+                    errors.append(f"{page_label} must be an object")
+                    continue
+                logical_page = page.get("logical_page")
+                if not isinstance(logical_page, int) or logical_page <= 0:
+                    errors.append(f"{page_label}.logical_page must be positive")
+                    continue
+                if logical_page in seen_pages:
+                    errors.append(f"{page_label}.logical_page is duplicated")
+                    continue
+                seen_pages.add(logical_page)
+                source_page = source_by_page.get(logical_page)
+                if not isinstance(source_page, dict) or source_page.get("status") != "verified":
+                    errors.append(f"{page_label}.logical_page must reference a verified source ledger page")
+                    continue
+                if page.get("source_sha256") != source_page.get("source_sha256"):
+                    errors.append(f"{page_label}.source_sha256 does not match its verified source page")
+                if page.get("source_sha256") != expected_page_hashes.get(logical_page):
+                    errors.append(f"{page_label}.source_sha256 does not match its source page")
+                prior_output = all_pages.get(logical_page)
+                if prior_output is not None and prior_output != output_id:
+                    errors.append(
+                        f"{page_label}.logical_page is already claimed by translation output {prior_output}"
+                    )
+                else:
+                    all_pages[logical_page] = output_id
+        if not require_text(entry.get("translated_by")):
+            errors.append(f"{label}.translated_by must be non-empty")
+        if not require_text(entry.get("reviewed_by")):
+            errors.append(f"{label}.reviewed_by must be non-empty")
+    errors += validate_exact_page_coverage(
+        owned_pages,
+        set(all_pages),
+        label="shard.translation.chapter_outputs.source_pages",
+    )
+
+    for index, entry in enumerate(glossary_proposals):
+        label = f"shard.translation.glossary_proposals[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        errors += validate_record_scope(claim, "glossary_proposals", entry, label=label, book_map=book_map)
+
+    for index, entry in enumerate(ambiguities):
+        label = f"shard.translation.ambiguities[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        errors += validate_record_scope(claim, "ambiguities", entry, label=label, book_map=book_map)
+        for source_page in entry.get("source_pages", []):
+            if isinstance(source_page, int) and source_page not in source_by_page:
+                errors.append(f"{label}.source_pages references an unknown source ledger page: {source_page}")
+        logical_page = entry.get("logical_page")
+        if isinstance(logical_page, int) and logical_page not in source_by_page:
+            errors.append(f"{label}.logical_page references an unknown source ledger page: {logical_page}")
+    return errors
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Verify a reviewed whole-book PT-BR translation against Audiobook Codex source text."
     )
+    parser.add_argument("--mode", choices=("approval", "claim"), default="approval")
     parser.add_argument("--book-map", required=True, type=Path)
     parser.add_argument("--ledger", required=True, type=Path)
-    parser.add_argument("--translation-ledger", required=True, type=Path)
+    parser.add_argument("--translation-ledger", type=Path)
     parser.add_argument("--text-root", required=True, type=Path)
+    parser.add_argument("--claim-map", type=Path)
+    parser.add_argument("--claim-id")
+    parser.add_argument("--shard", type=Path)
     args = parser.parse_args()
 
     try:
         map_path = args.book_map.expanduser().resolve()
         ledger_path = args.ledger.expanduser().resolve()
-        errors = verify(
-            load_json(map_path),
-            sha256_file(map_path),
-            load_json(ledger_path),
-            sha256_file(ledger_path),
-            load_json(args.translation_ledger.expanduser().resolve()),
-            args.text_root.expanduser().resolve(),
-        )
+        if args.mode == "approval":
+            if args.translation_ledger is None:
+                parser.error("--translation-ledger is required in approval mode")
+            errors = verify(
+                load_json(map_path),
+                sha256_file(map_path),
+                load_json(ledger_path),
+                sha256_file(ledger_path),
+                load_json(args.translation_ledger.expanduser().resolve()),
+                args.text_root.expanduser().resolve(),
+            )
+        else:
+            if args.claim_map is None or args.claim_id is None or args.shard is None:
+                parser.error("--claim-map, --claim-id, and --shard are required in claim mode")
+            shard_path = args.shard.expanduser().resolve()
+            errors = verify_claim(
+                load_json(map_path),
+                sha256_file(map_path),
+                load_json(ledger_path),
+                sha256_file(ledger_path),
+                load_json(shard_path),
+                load_json(args.claim_map.expanduser().resolve()),
+                args.claim_id,
+                args.text_root.expanduser().resolve(),
+                shard_path,
+            )
     except RuntimeError as error:
         print(f"INVALID: {error}", file=sys.stderr)
         raise SystemExit(1) from error

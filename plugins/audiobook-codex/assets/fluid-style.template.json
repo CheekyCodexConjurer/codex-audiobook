@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.2",
+  "profile": "fluid-faithful-ptbr-v1",
+  "language": "pt-BR",
+  "base_edition": "translated-pt-br",
+  "voice": {
+    "register": "natural standard PT-BR",
+    "tone": "clear, faithful, and listener-friendly",
+    "cadence": "smooth audiobook narration",
+    "terminology": "use approved glossary forms consistently; never blanket-preserve archaic surface forms inside historical quotations",
+    "title_policy": "preserve approved titles consistently; do not invent subtitles or embellishments"
+  },
+  "rules": {
+    "preserve_meaning": true,
+    "no_added_content": true,
+    "no_omitted_content": true,
+    "modernize_grammar_and_lexicon": true,
+    "modernize_all_archaic_language": true,
+    "modernize_historical_quotations": true,
+    "modernize_orthography_and_diacritics": true,
+    "omit_parenthetical_citation_references": true,
+    "omit_immediate_duplicate_translations": true,
+    "omit_translation_labels": true,
+    "reduce_redundancy": true,
+    "clarify_referents": true,
+    "preserve_examples_and_arguments": true,
+    "preserve_authorial_stance": true
+  },
+  "glossary": [
+    {
+      "term": "example term",
+      "preferred_form": "approved fluid form",
+      "notes": "Replace with reviewed project terminology.",
+      "status": "approved",
+      "reviewed_by": "audiobook-verifier"
+    }
+  ],
+  "reviewed_by": "audiobook-verifier"
+}

@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 from io import BytesIO
 import html
+import os
 from pathlib import Path
 import re
 import sys
 
 from book_layout import resolve_book_paths
+from publication_selection import uses_unsuffixed_fluid_export_name
 from epub_presentation import (
     FONT_ROOT,
     PROFILE_NAME,
@@ -20,6 +22,13 @@ from export_epub import (
     TEXT_EDITIONS,
     _attached_note_matches,
     _layout_text_values,
+    cached_export_is_current,
+    export_fingerprint_payload,
+    export_input_fingerprint,
+    heading_markup,
+    is_fluid_supplementary_document,
+    is_fluid_supplementary_title,
+    join_semantic_values,
     load_export_context,
     normalize_space,
     paragraphs_from_text,
@@ -27,7 +36,9 @@ from export_epub import (
     require_text,
     safe_segment,
     selected_asset,
+    semantic_block_groups,
     sha256_file,
+    temporary_output_path,
     validate_documents,
     write_json,
 )
@@ -87,11 +98,20 @@ def resolve_export_output(
     return output
 
 
+def current_renderer() -> dict:
+    return {
+        "name": "reportlab",
+        "version": str(_require_reportlab()["reportlab"].Version),
+    }
+
+
 def edition_label(text_edition: str, image_edition: str, classic: bool) -> str:
     if text_edition == "original":
         value = "fiel" if image_edition == "original" else "restaurada"
     elif text_edition == "revised-pt-br":
         value = "revisada" if image_edition == "original" else "revisada-restaurada"
+    elif text_edition == "fluid-pt-br":
+        value = "fluida" if image_edition == "original" else "fluida-restaurada"
     else:
         value = "pt-br" if image_edition == "original" else "pt-br-restaurada"
     return f"{value}-classico" if classic else value
@@ -147,11 +167,13 @@ def _fit_image(path: Path, maximum_width: float, maximum_height: float) -> tuple
 
 DIALOGUE_LEFT_INDENT_MM = 18
 DIALOGUE_FIRST_LINE_INDENT_MM = 0
+QUOTATION_INDENT_MM = 18
 FOOTNOTE_FONT_SIZE = 8.5
 FOOTNOTE_LEADING = 10.2
 FOOTNOTE_SEPARATOR_WIDTH_MM = 50
 FOOTNOTE_SEPARATOR_GAP_MM = 2
 FOOTNOTE_SPACE_MM = 1
+_URL_PARAGRAPH = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
 
 
 def _dialogue_paragraph_style(
@@ -169,6 +191,22 @@ def _dialogue_paragraph_style(
         leftIndent=DIALOGUE_LEFT_INDENT_MM * mm,
         rightIndent=0,
         firstLineIndent=DIALOGUE_FIRST_LINE_INDENT_MM * mm,
+    )
+
+
+def _quotation_paragraph_style(
+    paragraph_style: type,
+    parent: object,
+    mm: float,
+    ta_justify: int,
+) -> object:
+    return paragraph_style(
+        "Quotation",
+        parent=parent,
+        alignment=ta_justify,
+        leftIndent=QUOTATION_INDENT_MM * mm,
+        rightIndent=QUOTATION_INDENT_MM * mm,
+        firstLineIndent=0,
     )
 
 
@@ -211,6 +249,29 @@ def _footnote_paragraph_style(
     )
 
 
+def _url_paragraph_style(
+    paragraph_style: type,
+    parent: object,
+    ta_left: int,
+) -> object:
+    return paragraph_style(
+        "URL",
+        parent=parent,
+        fontSize=8.7,
+        leading=10.8,
+        alignment=ta_left,
+        firstLineIndent=0,
+        spaceBefore=0,
+        spaceAfter=3,
+        splitLongWords=True,
+        wordWrap="CJK",
+    )
+
+
+def _is_url_paragraph(value: str) -> bool:
+    return _URL_PARAGRAPH.fullmatch(normalize_space(value)) is not None
+
+
 def _referenced_note_ids(value: str, note_ids: dict[str, str]) -> tuple[str, ...]:
     references: list[str] = []
     for _start, _end, _marker, note_id in _attached_note_matches(
@@ -227,6 +288,7 @@ def write_pdf(
     book_root: Path,
     book: dict,
     language: str,
+    text_edition: str,
     documents: list[dict],
     selected_assets_by_document: dict[str, list[dict]],
     visual_profile: dict | None,
@@ -426,6 +488,12 @@ def write_pdf(
         mm,
         TA_RIGHT,
     )
+    quotation = _quotation_paragraph_style(
+        ParagraphStyle,
+        body,
+        mm,
+        TA_JUSTIFY,
+    )
     verse = _verse_paragraph_style(
         ParagraphStyle,
         body,
@@ -435,6 +503,11 @@ def write_pdf(
         ParagraphStyle,
         body,
         regular_font,
+        TA_LEFT,
+    )
+    url = _url_paragraph_style(
+        ParagraphStyle,
+        body,
         TA_LEFT,
     )
     heading_styles = {
@@ -668,6 +741,11 @@ def write_pdf(
             )
 
     for document_index, document in enumerate(documents):
+        if (
+            text_edition == "fluid-pt-br"
+            and is_fluid_supplementary_document(document)
+        ):
+            continue
         if document_index:
             append_page_break()
         assets = selected_assets_by_document[document["id"]]
@@ -679,19 +757,27 @@ def write_pdf(
         blocks = document.get("_layout_blocks")
         if not isinstance(blocks, list):
             text = document["_text_path"].read_text(encoding="utf-8")
-            heading, paragraphs = paragraphs_from_text(text, str(document["title"]))
-            heading_flowable = Paragraph(html.escape(heading), heading_styles[1])
+            heading, paragraphs = paragraphs_from_text(
+                text,
+                str(document["title"]),
+                allow_leading_chapter_label=document.get("kind") == "chapter",
+            )
+            heading_flowable = Paragraph(heading_markup(heading), heading_styles[1])
             heading_flowable.outline_level = 0
-            heading_flowable.outline_text = normalize_space(heading)
+            heading_flowable.outline_text = str(document["title"])
             heading_flowable.outline_key = f"document-{document_index}"
             story.append(heading_flowable)
             for asset in assets:
                 if asset["placement"] != "end":
                     append_image(asset)
-            story.extend(
-                Paragraph(html.escape(normalize_space(value)), body)
-                for value in paragraphs
-            )
+            for value in paragraphs:
+                normalized_value = normalize_space(value)
+                story.append(
+                    Paragraph(
+                        html.escape(normalized_value),
+                        url if _is_url_paragraph(normalized_value) else body,
+                    )
+                )
             for asset in assets:
                 if asset["placement"] == "end":
                     append_image(asset)
@@ -711,17 +797,27 @@ def write_pdf(
             flowable.outline_key = f"document-{document_index}"
             story.append(flowable)
             outline_added = True
-        for block_index, block in enumerate(blocks):
+        for block_index, block_group in semantic_block_groups(blocks):
+            block = block_group[0]
             kind = block["kind"]
-            lines = _layout_text_values(
-                block,
-                book_root,
-                changes,
-                applied_revision_ids,
-            )
+            lines: list[str] = []
+            for grouped_block in block_group:
+                lines.extend(
+                    _layout_text_values(
+                        grouped_block,
+                        book_root,
+                        changes,
+                        applied_revision_ids,
+                    )
+                )
             if kind == "heading":
                 level = int(block["level"])
                 value = "<br/>".join(_rich_text(line, note_ids) for line in lines)
+                if (
+                    text_edition == "fluid-pt-br"
+                    and any(is_fluid_supplementary_title(line) for line in lines)
+                ):
+                    break
                 if is_title_page:
                     heading_style = (
                         source_title_heading_first
@@ -733,7 +829,7 @@ def write_pdf(
                 flowable = Paragraph(value, heading_style)
                 if not outline_added:
                     flowable.outline_level = 0
-                    flowable.outline_text = normalize_space(" ".join(lines))
+                    flowable.outline_text = str(document["title"])
                     flowable.outline_key = f"document-{document_index}"
                     outline_added = True
                 append_flowable(flowable, " ".join(lines))
@@ -742,11 +838,25 @@ def write_pdf(
                         append_image(asset)
                     inserted_before_assets = True
             elif kind == "paragraph":
-                value = " ".join(lines)
+                value = join_semantic_values(lines)
+                paragraph_style = (
+                    source_title_text
+                    if is_title_page
+                    else (url if _is_url_paragraph(value) else body)
+                )
                 append_flowable(
                     Paragraph(
                         _rich_text(value, note_ids),
-                        source_title_text if is_title_page else body,
+                        paragraph_style,
+                    ),
+                    value,
+                )
+            elif kind == "quotation":
+                value = join_semantic_values(lines)
+                append_flowable(
+                    Paragraph(
+                        _rich_text(value, note_ids),
+                        quotation,
                     ),
                     value,
                 )
@@ -788,21 +898,32 @@ def write_pdf(
                 f"{missing}"
             )
     output.parent.mkdir(parents=True, exist_ok=True)
-    document = EditorialDocTemplate(str(output))
+    staged = temporary_output_path(output, ".pdf")
+    if staged.exists():
+        raise RuntimeError(f"Temporary PDF export already exists: {staged}")
+    document = EditorialDocTemplate(str(staged))
     try:
         document.multiBuild(story)
     except Exception as error:
-        if output.exists():
-            output.unlink()
+        if staged.exists():
+            staged.unlink()
         raise RuntimeError(f"Cannot compose editorial PDF: {error}") from error
 
     try:
         from pypdf import PdfReader
     except ImportError as error:
+        if staged.exists():
+            staged.unlink()
         raise RuntimeError(
             "pypdf is required to finalize PDF export. Run this script with the Codex bundled Python."
         ) from error
-    page_count = len(PdfReader(str(output)).pages)
+    try:
+        page_count = len(PdfReader(str(staged)).pages)
+        os.replace(staged, output)
+    except Exception:
+        if staged.exists():
+            staged.unlink()
+        raise
     presentation = None
     if visual_profile is not None and cover_bytes is not None:
         presentation = {
@@ -822,6 +943,118 @@ def write_pdf(
             ],
         }
     return assets_used, presentation, page_count, str(reportlab.Version)
+
+
+def pdf_sidecar_assets(
+    documents: list[dict],
+    selected_assets_by_document: dict[str, list[dict]],
+) -> list[dict]:
+    assets_used: list[dict] = []
+    for document in documents:
+        for asset in selected_assets_by_document[document["id"]]:
+            if any(record["id"] == asset["id"] for record in assets_used):
+                continue
+            assets_used.append(
+                {
+                    "id": asset["id"],
+                    "sha256": asset["sha256"],
+                    "media_type": asset["media_type"],
+                }
+            )
+    return assets_used
+
+
+def pdf_sidecar_presentation(book: dict, visual_profile: dict | None) -> dict | None:
+    if visual_profile is None:
+        return None
+    cover_bytes = cover_image(book, "PDF")
+    return {
+        "name": PROFILE_NAME,
+        "cover": {
+            "sha256": __import__("hashlib").sha256(cover_bytes).hexdigest(),
+            "media_type": "image/jpeg",
+            "format_label": "PDF",
+        },
+        "resources": [
+            {
+                "id": resource.identifier,
+                "source_sha256": resource.sha256,
+                "media_type": resource.media_type,
+            }
+            for resource in profile_resources(visual_profile)
+        ],
+    }
+
+
+def read_pdf_page_count(path: Path) -> int | None:
+    try:
+        from pypdf import PdfReader
+
+        return len(PdfReader(str(path)).pages)
+    except Exception:
+        return None
+
+
+def pdf_sidecar_data(
+    output: Path,
+    book_root: Path,
+    fingerprint: dict,
+    image_edition: str,
+    text_edition: str,
+    manifest: dict,
+    map_path: Path,
+    ledger_path: Path,
+    assets_manifest_path: Path,
+    documents: list[dict],
+    selected_assets_by_document: dict[str, list[dict]],
+    layout: dict | None,
+    renderer: dict,
+    presentation: dict | None,
+    page_count: int | None = None,
+) -> dict:
+    sidecar_data = {
+        "schema_version": "1.0",
+        "pdf_path": relative_to_book(book_root, output),
+        "pdf_sha256": sha256_file(output),
+        "input_fingerprint": fingerprint,
+        "image_edition": image_edition,
+        "text_edition": text_edition,
+        "language": manifest["language"],
+        "book_map_sha256": sha256_file(map_path),
+        "text_ledger_sha256": sha256_file(ledger_path),
+        "assets_manifest_sha256": sha256_file(assets_manifest_path),
+        "renderer": renderer,
+        "assets": pdf_sidecar_assets(documents, selected_assets_by_document),
+    }
+    resolved_page_count = page_count if page_count is not None else read_pdf_page_count(output)
+    if resolved_page_count is not None:
+        sidecar_data["page_count"] = resolved_page_count
+    if text_edition == "translated-pt-br":
+        sidecar_data["source_language"] = manifest["source_language"]
+        sidecar_data["translation_ledger_sha256"] = manifest[
+            "translation_ledger_sha256"
+        ]
+    elif text_edition == "revised-pt-br":
+        sidecar_data["revision_ledger_sha256"] = manifest["revision_ledger_sha256"]
+    elif text_edition == "fluid-pt-br":
+        for key in (
+            "base_edition",
+            "base_ledger_sha256",
+            "fluid_style_sha256",
+            "fluid_edition_ledger_sha256",
+            "profile",
+        ):
+            sidecar_data[key] = manifest[key]
+        if manifest["base_edition"] == "translated-pt-br":
+            sidecar_data["source_language"] = manifest["source_language"]
+            sidecar_data["translation_ledger_sha256"] = manifest[
+                "translation_ledger_sha256"
+            ]
+    if isinstance(layout, dict):
+        sidecar_data["layout"] = manifest["layout"]
+    if presentation:
+        sidecar_data["visual_profile"] = presentation
+    return sidecar_data
 
 
 def main() -> None:
@@ -852,12 +1085,16 @@ def main() -> None:
             else book_root
             / "metadata"
             / (
-                "epub-manifest.pt-br.json"
-                if args.text_edition == "translated-pt-br"
+                "epub-manifest.fluid.json"
+                if args.text_edition == "fluid-pt-br"
                 else (
-                    "epub-manifest.revised.json"
-                    if args.text_edition == "revised-pt-br"
-                    else "epub-manifest.json"
+                    "epub-manifest.pt-br.json"
+                    if args.text_edition == "translated-pt-br"
+                    else (
+                        "epub-manifest.revised.json"
+                        if args.text_edition == "revised-pt-br"
+                        else "epub-manifest.json"
+                    )
                 )
             )
         )
@@ -875,6 +1112,8 @@ def main() -> None:
             ledger_path,
             translation_ledger,
             revision_ledger,
+            _fluid_style,
+            fluid_ledger,
             layout,
         ) = load_export_context(
             book_root,
@@ -890,6 +1129,7 @@ def main() -> None:
             args.text_edition,
             translation_ledger,
             revision_ledger,
+            fluid_ledger,
             layout,
         )
         selected_assets_by_document = {
@@ -906,51 +1146,101 @@ def main() -> None:
             args.image_edition,
             visual_profile is not None,
         )
+        default_name = (
+            f"{safe_segment(book['title'], 'book')}.pdf"
+            if uses_unsuffixed_fluid_export_name(book_root, args.text_edition)
+            else f"{safe_segment(book['title'], 'book')}-{label}.pdf"
+        )
         output = resolve_export_output(
             book_root,
             args.output,
-            f"{safe_segment(book['title'], 'book')}-{label}.pdf",
+            default_name,
         )
-        assets, presentation, page_count, renderer_version = write_pdf(
+        sidecar = output.with_suffix(".pdf.json")
+        renderer = current_renderer()
+        fingerprint = export_input_fingerprint(
+            export_fingerprint_payload(
+                "pdf",
+                book_root,
+                epub_manifest_path,
+                assets_manifest_path,
+                map_path,
+                ledger_path,
+                manifest,
+                book,
+                str(manifest["language"]),
+                args.text_edition,
+                args.image_edition,
+                documents,
+                selected_assets_by_document,
+                visual_profile,
+                renderer,
+            )
+        )
+        existing_page_count = read_pdf_page_count(output) if output.is_file() else None
+        expected_sidecar = (
+            pdf_sidecar_data(
+                output,
+                book_root,
+                fingerprint,
+                args.image_edition,
+                args.text_edition,
+                manifest,
+                map_path,
+                ledger_path,
+                assets_manifest_path,
+                documents,
+                selected_assets_by_document,
+                layout,
+                renderer,
+                pdf_sidecar_presentation(book, visual_profile),
+                existing_page_count,
+            )
+            if existing_page_count is not None
+            else None
+        )
+        if cached_export_is_current(
+            output,
+            sidecar,
+            book_root,
+            "pdf_path",
+            "pdf_sha256",
+            fingerprint,
+            expected_sidecar,
+        ):
+            print(f"Up to date {output}")
+            print(f"Up to date {sidecar}")
+            return
+        _assets, presentation, page_count, renderer_version = write_pdf(
             output,
             book_root,
             book,
             str(manifest["language"]),
+            args.text_edition,
             documents,
             selected_assets_by_document,
             visual_profile,
         )
-        sidecar = output.with_suffix(".pdf.json")
-        sidecar_data = {
-            "schema_version": "1.0",
-            "pdf_path": relative_to_book(book_root, output),
-            "pdf_sha256": sha256_file(output),
-            "page_count": page_count,
-            "image_edition": args.image_edition,
-            "text_edition": args.text_edition,
-            "language": manifest["language"],
-            "book_map_sha256": sha256_file(map_path),
-            "text_ledger_sha256": sha256_file(ledger_path),
-            "assets_manifest_sha256": sha256_file(assets_manifest_path),
-            "renderer": {
+        sidecar_data = pdf_sidecar_data(
+            output,
+            book_root,
+            fingerprint,
+            args.image_edition,
+            args.text_edition,
+            manifest,
+            map_path,
+            ledger_path,
+            assets_manifest_path,
+            documents,
+            selected_assets_by_document,
+            layout,
+            {
                 "name": "reportlab",
                 "version": renderer_version,
             },
-            "assets": assets,
-        }
-        if args.text_edition == "translated-pt-br":
-            sidecar_data["source_language"] = manifest["source_language"]
-            sidecar_data["translation_ledger_sha256"] = manifest[
-                "translation_ledger_sha256"
-            ]
-        elif args.text_edition == "revised-pt-br":
-            sidecar_data["revision_ledger_sha256"] = manifest[
-                "revision_ledger_sha256"
-            ]
-        if isinstance(layout, dict):
-            sidecar_data["layout"] = manifest["layout"]
-        if presentation:
-            sidecar_data["visual_profile"] = presentation
+            presentation,
+            page_count,
+        )
         write_json(sidecar, sidecar_data)
     except RuntimeError as error:
         print(f"Cannot export PDF: {error}", file=sys.stderr)

@@ -19,6 +19,7 @@ SPEECH_RMS_THRESHOLD = 180
 MAX_RENDERED_SILENCE_SECONDS = 4.0
 MIN_RENDERED_VOICED_RATIO = 0.10
 SPEECH_WINDOW_SECONDS = 0.05
+WAV_COPY_BLOCK_FRAMES = SAMPLE_RATE
 
 
 def wave_params(path: Path) -> tuple[int, int, int]:
@@ -151,17 +152,33 @@ def join_wavs(
         output.setsampwidth(SAMPLE_WIDTH)
         output.setframerate(SAMPLE_RATE)
         for index, segment in enumerate(segment_paths):
-            if wave_params(segment) != (CHANNELS, SAMPLE_WIDTH, SAMPLE_RATE):
-                raise RuntimeError(f"Unexpected WAV format: {segment}")
             with wave.open(str(segment), "rb") as source:
-                frames = source.readframes(source.getnframes())
-                output.writeframes(frames)
-                total_frames += source.getnframes()
+                params = (
+                    source.getnchannels(),
+                    source.getsampwidth(),
+                    source.getframerate(),
+                )
+                if params != (CHANNELS, SAMPLE_WIDTH, SAMPLE_RATE):
+                    raise RuntimeError(f"Unexpected WAV format: {segment}")
+                remaining = source.getnframes()
+                while remaining > 0:
+                    frame_count = min(WAV_COPY_BLOCK_FRAMES, remaining)
+                    frames = source.readframes(frame_count)
+                    if not frames:
+                        break
+                    copied_frames = len(frames) // (CHANNELS * SAMPLE_WIDTH)
+                    if copied_frames <= 0:
+                        break
+                    output.writeframesraw(frames)
+                    total_frames += copied_frames
+                    remaining -= copied_frames
             pause = boundary_pauses[index] if index < len(boundary_pauses) else 0.0
-            silence = b"\x00\x00" * int(SAMPLE_RATE * max(0, pause))
-            if silence:
-                output.writeframes(silence)
-                total_frames += len(silence) // (CHANNELS * SAMPLE_WIDTH)
+            silence_frames = int(SAMPLE_RATE * max(0, pause))
+            total_frames += silence_frames
+            while silence_frames > 0:
+                frame_count = min(WAV_COPY_BLOCK_FRAMES, silence_frames)
+                output.writeframesraw(b"\x00" * (frame_count * CHANNELS * SAMPLE_WIDTH))
+                silence_frames -= frame_count
     return total_frames / SAMPLE_RATE
 
 

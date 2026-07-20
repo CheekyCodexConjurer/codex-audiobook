@@ -25,6 +25,7 @@ from book_layout import (
     paths_for_new_book,
     resolve_book_paths,
 )
+from publication_selection import default_selection, selection_path
 
 
 def sha256_file(path: Path) -> str:
@@ -560,6 +561,9 @@ def main() -> None:
         }
     )
     write_json(map_path, book_map)
+    publication_selection_path = selection_path(output_root)
+    if not publication_selection_path.exists():
+        write_json(publication_selection_path, default_selection())
     assets_path = write_assets_manifest(
         output_root,
         source_sha256,
@@ -569,6 +573,7 @@ def main() -> None:
     print(f"Assembly root: {output_root}")
     print(f"Stored source: {source}")
     print(f"Created {map_path}")
+    print(f"Created {publication_selection_path}")
     print(f"Created {assets_path}")
     print(
         f"Source: {book_map['source']['format']}, logical units: {book_map['source']['page_count_logical']}, "

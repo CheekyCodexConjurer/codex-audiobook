@@ -1,0 +1,35 @@
+{
+  "schema_version": "1.0",
+  "shard_kind": "text",
+  "claim_id": "TRANSCRIBE-chapter-01",
+  "claim_sha256": "",
+  "producer": "audiobook-transcriber",
+  "verifier": "audiobook-verifier",
+  "order": 1,
+  "text": {
+    "pages": [
+      {
+        "logical_page": 1,
+        "status": "verified",
+        "source_file": "source/pages/page-0001.txt",
+        "source_sha256": "",
+        "verified_by": "audiobook-verifier",
+        "notes": ""
+      }
+    ],
+    "chapter_outputs": [
+      {
+        "id": "chapter-01",
+        "source_file": "source/chapters/chapter-01.txt",
+        "source_sha256": "",
+        "source_pages": [
+          {
+            "logical_page": 1,
+            "source_sha256": ""
+          }
+        ],
+        "verified_by": "audiobook-verifier"
+      }
+    ]
+  }
+}

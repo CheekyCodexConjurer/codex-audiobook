@@ -50,8 +50,15 @@ def validate_plan(book_root: Path, input_file: Path, plan_path: Path) -> tuple[l
         expected_hashes["base_ledger_sha256"] = (
             book_root / "metadata" / "translation-ledger.json"
         )
+    elif base_edition == "fluid-pt-br":
+        expected_hashes["base_ledger_sha256"] = (
+            book_root / "metadata" / "fluid-edition-ledger.json"
+        )
     else:
-        errors.append("narrator changes base_edition must be source or translated-pt-br")
+        errors.append(
+            "narrator changes base_edition must be source, translated-pt-br, "
+            "or fluid-pt-br"
+        )
     for key, path in expected_hashes.items():
         if not path.is_file():
             errors.append(f"narration plan requires {path.name}")

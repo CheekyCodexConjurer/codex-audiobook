@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 from unicodedata import normalize
 
@@ -17,9 +18,18 @@ from verify_translation_ledger import (
     translation_chapter_output_records,
     verify as verify_translation_ledger,
 )
+from verify_fluid_edition_ledger import (
+    fluid_chapter_output_records,
+    verify as verify_fluid_edition_ledger,
+)
 
 
-NARRATOR_MODES = {"faithful", "archaic-modernized", "translated-pt-br"}
+NARRATOR_MODES = {
+    "faithful",
+    "archaic-modernized",
+    "fluid-pt-br",
+    "translated-pt-br",
+}
 CHANGE_KINDS = {
     "spoken_expansion",
     "punctuation",
@@ -29,10 +39,24 @@ CHANGE_KINDS = {
     "archaic_lexical_modernization",
     "pronunciation",
     "editorial_correction",
+    "footnote_exclusion",
+    "page_furniture_exclusion",
+    "supplementary_matter_exclusion",
     "note_relocation",
     "preserved_original",
 }
 ARCHAIC_CHANGE_KINDS = {"orthographic_modernization", "archaic_lexical_modernization"}
+SUPPLEMENTARY_MATTER_KINDS = {
+    "bibliography",
+    "references",
+    "glossary",
+    "index",
+    "further_reading",
+    "source_list",
+    "colophon",
+    "mixed_back_matter",
+}
+PAGE_FOLIO = re.compile(r"^\d{1,4}$")
 
 
 def require_text(value: object) -> bool:
@@ -41,6 +65,57 @@ def require_text(value: object) -> bool:
 
 def normalized_text(value: str) -> str:
     return " ".join(normalize("NFC", value).split())
+
+
+def _base_file_and_hash(record: dict) -> tuple[object, object]:
+    if "fluid_file" in record:
+        return record.get("fluid_file"), record.get("fluid_sha256")
+    if "translation_file" in record:
+        return record.get("translation_file"), record.get("translation_sha256")
+    return record.get("source_file"), record.get("source_sha256")
+
+
+def _base_output_pages(record: dict) -> set[int]:
+    return {
+        page.get("logical_page")
+        for page in record.get("source_pages", [])
+        if isinstance(page, dict)
+        and isinstance(page.get("logical_page"), int)
+        and page["logical_page"] > 0
+    }
+
+
+def _narration_excluded_pages(book_map: dict) -> set[int]:
+    ranges = book_map.get("ranges")
+    entries = ranges.get("narration_excluded") if isinstance(ranges, dict) else None
+    if not isinstance(entries, list):
+        return set()
+    pages: set[int] = set()
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        start = entry.get("logical_start_page")
+        end = entry.get("logical_end_page")
+        if (
+            isinstance(start, int)
+            and isinstance(end, int)
+            and start > 0
+            and end >= start
+        ):
+            pages.update(range(start, end + 1))
+    return pages
+
+
+def _narration_excluded_base_ids(
+    book_map: dict,
+    base_outputs: dict[str, dict],
+) -> set[str]:
+    excluded_pages = _narration_excluded_pages(book_map)
+    return {
+        output_id
+        for output_id, record in base_outputs.items()
+        if (pages := _base_output_pages(record)) and pages.issubset(excluded_pages)
+    }
 
 
 def _book_source_hash(book_map: dict, book_root: Path) -> str | None:
@@ -78,8 +153,52 @@ def _load_base_context(
             True,
         )
         return errors, chapter_output_records(source_ledger), sha256_file(source_ledger_path), source_ledger
+    if base_edition == "fluid-pt-br":
+        fluid_style_path = book_root / "metadata" / "fluid-style.json"
+        fluid_ledger_path = book_root / "metadata" / "fluid-edition-ledger.json"
+        try:
+            fluid_style = load_json(fluid_style_path)
+            fluid_ledger = load_json(fluid_ledger_path)
+        except RuntimeError as error:
+            return [str(error)], {}, None, None
+        if not isinstance(fluid_style, dict):
+            return ["fluid-style.json must be an object"], {}, None, None
+        if not isinstance(fluid_ledger, dict):
+            return ["fluid-edition-ledger.json must be an object"], {}, None, None
+        translation_ledger = None
+        translation_sha256 = None
+        if fluid_ledger.get("base_edition") == "translated-pt-br":
+            translation_path = book_root / "metadata" / "translation-ledger.json"
+            try:
+                translation_ledger = load_json(translation_path)
+            except RuntimeError as error:
+                return [str(error)], {}, None, None
+            if not isinstance(translation_ledger, dict):
+                return ["translation-ledger.json must be an object"], {}, None, None
+            translation_sha256 = sha256_file(translation_path)
+        errors += verify_fluid_edition_ledger(
+            book_map,
+            book_map_sha256,
+            source_ledger,
+            sha256_file(source_ledger_path),
+            translation_ledger,
+            translation_sha256,
+            fluid_style,
+            sha256_file(fluid_style_path),
+            fluid_ledger,
+            text_root,
+        )
+        return (
+            errors,
+            fluid_chapter_output_records(fluid_ledger),
+            sha256_file(fluid_ledger_path),
+            source_ledger,
+        )
     if base_edition != "translated-pt-br":
-        return ["narrator changes base_edition must be source or translated-pt-br"], {}, None, None
+        return [
+            "narrator changes base_edition must be source, translated-pt-br, "
+            "or fluid-pt-br"
+        ], {}, None, None
 
     translation_path = book_root / "metadata" / "translation-ledger.json"
     try:
@@ -175,6 +294,7 @@ def _validate_outputs(
     base_outputs: dict[str, dict],
     text_root: Path,
     input_file: Path | None,
+    narration_excluded_base_ids: set[str],
 ) -> tuple[list[str], dict | None]:
     errors: list[str] = []
     outputs = narrator_changes.get("outputs")
@@ -220,6 +340,8 @@ def _validate_outputs(
             errors.append(f"{label}.base_outputs must be a non-empty array")
             continue
         seen_base_ids: set[str] = set()
+        seen_locutor_chapters: set[Path] = set()
+        ordered_locutor_texts: list[str] = []
         for base_index, base_entry in enumerate(base_entries):
             base_label = f"{label}.base_outputs[{base_index}]"
             if not isinstance(base_entry, dict):
@@ -238,22 +360,67 @@ def _validate_outputs(
             if not isinstance(expected, dict):
                 errors.append(f"{base_label}.id has no validated base output")
                 continue
-            expected_file = (
-                expected.get("translation_file")
-                if "translation_file" in expected
-                else expected.get("source_file")
-            )
-            expected_hash = (
-                expected.get("translation_sha256")
-                if "translation_file" in expected
-                else expected.get("source_sha256")
-            )
+            expected_file, expected_hash = _base_file_and_hash(expected)
             if base_entry.get("base_file") != expected_file:
                 errors.append(f"{base_label}.base_file does not match validated base output")
             if base_entry.get("base_sha256") != expected_hash:
                 errors.append(f"{base_label}.base_sha256 does not match validated base output")
-        if entry.get("kind") == "full-book" and seen_base_ids != expected_base_ids:
-            errors.append(f"{label}.base_outputs must cover every validated base output")
+            locutor_file = base_entry.get("locutor_file")
+            if locutor_file is not None:
+                locutor_chapter = resolve_under(
+                    text_root,
+                    locutor_file,
+                    (Path("locutor") / "chapters",),
+                )
+            elif isinstance(expected_file, str) and expected_file.strip():
+                locutor_chapter = (
+                    text_root
+                    / "locutor"
+                    / "chapters"
+                    / Path(expected_file).name
+                ).resolve()
+            else:
+                locutor_chapter = None
+            if locutor_chapter is None:
+                errors.append(
+                    f"{base_label}.locutor_file must resolve under "
+                    "locutor/chapters/"
+                )
+            elif (
+                not locutor_chapter.is_file()
+                or not locutor_chapter.read_text(encoding="utf-8").strip()
+            ):
+                errors.append(
+                    f"{base_label}.locutor_file is missing or empty"
+                )
+            elif locutor_chapter in seen_locutor_chapters:
+                errors.append(
+                    f"{base_label}.locutor_file is duplicated"
+                )
+            else:
+                seen_locutor_chapters.add(locutor_chapter)
+                ordered_locutor_texts.append(
+                    locutor_chapter.read_text(encoding="utf-8")
+                )
+        if (
+            locutor_path.is_file()
+            and len(ordered_locutor_texts) == len(base_entries)
+            and normalized_text(" ".join(ordered_locutor_texts))
+            != normalized_text(locutor_path.read_text(encoding="utf-8"))
+        ):
+            errors.append(
+                f"{label}.locutor_file must equal the ordered normalized "
+                "concatenation of its locutor chapter files"
+            )
+        if entry.get("kind") == "full-book":
+            unsupported_missing = (
+                expected_base_ids - seen_base_ids - narration_excluded_base_ids
+            )
+            if unsupported_missing:
+                errors.append(
+                    f"{label}.base_outputs must cover every validated base output "
+                    "except complete map-backed narration exclusions"
+                )
         if entry.get("kind") == "chapter" and len(seen_base_ids) != 1:
             errors.append(f"{label}.chapter output must reference exactly one base output")
         if input_file is not None and locutor_path == input_file:
@@ -271,6 +438,8 @@ def _validate_changes(
     text_root: Path,
     mode: str,
     archaic_evidence: set[tuple[int, str, str]],
+    narration_excluded_base_ids: set[str],
+    narration_excluded_pages: set[int],
 ) -> list[str]:
     errors: list[str] = []
     changes = narrator_changes.get("changes")
@@ -278,6 +447,7 @@ def _validate_changes(
         return ["narrator changes changes must be an array"]
     archaic_change_seen = False
     changes_by_output: dict[str, list[dict]] = {}
+    mapped_exclusions_by_output: dict[str, set[str]] = {}
     for index, entry in enumerate(changes):
         label = f"narrator changes.changes[{index}]"
         if not isinstance(entry, dict):
@@ -294,28 +464,37 @@ def _validate_changes(
         if not require_text(entry.get("base_output_id")):
             errors.append(f"{label}.base_output_id must be non-empty")
             continue
-        else:
-            base_ids = {
-                base.get("id")
-                for base in output.get("base_outputs", [])
-                if isinstance(base, dict)
-            }
-            if entry["base_output_id"] not in base_ids:
-                errors.append(f"{label}.base_output_id is not declared by its output")
-                continue
-        base_record = base_outputs.get(entry["base_output_id"])
+        base_output_id = entry["base_output_id"].strip()
+        base_ids = {
+            base.get("id")
+            for base in output.get("base_outputs", [])
+            if isinstance(base, dict)
+        }
+        whole_output_exclusion = (
+            kind == "mapped_exclusion"
+            and output.get("kind") == "full-book"
+            and base_output_id not in base_ids
+            and base_output_id in narration_excluded_base_ids
+        )
+        footnote_exclusion = kind == "footnote_exclusion"
+        page_furniture_exclusion = kind == "page_furniture_exclusion"
+        supplementary_exclusion = kind == "supplementary_matter_exclusion"
+        if base_output_id not in base_ids and not whole_output_exclusion:
+            errors.append(f"{label}.base_output_id is not declared by its output")
+            continue
+        base_record = base_outputs.get(base_output_id)
         if not isinstance(base_record, dict):
             errors.append(f"{label}.base_output_id has no validated base output")
             continue
-        base_file = (
-            base_record.get("translation_file")
-            if "translation_file" in base_record
-            else base_record.get("source_file")
-        )
+        base_file, _base_sha256 = _base_file_and_hash(base_record)
         base_path = resolve_under(
             text_root,
             base_file,
-            (Path("source"), Path("translation") / TARGET_LANGUAGE),
+            (
+                Path("source"),
+                Path("translation") / TARGET_LANGUAGE,
+                Path("fluid") / TARGET_LANGUAGE,
+            ),
         )
         locutor_path = resolve_under(text_root, output.get("locutor_file"), (Path("locutor"),))
         if base_path is None or not base_path.is_file():
@@ -325,15 +504,78 @@ def _validate_changes(
             errors.append(f"{label}.output_id locutor file is unavailable")
             continue
         base_span = normalized_text(str(entry.get("base_span") or ""))
-        locutor_span = normalized_text(str(entry.get("locutor_span") or ""))
+        locutor_span_value = entry.get("locutor_span")
+        locutor_span = normalized_text(str(locutor_span_value or ""))
         if not base_span:
             errors.append(f"{label}.base_span must be non-empty")
         elif base_span not in normalized_text(base_path.read_text(encoding="utf-8")):
             errors.append(f"{label}.base_span does not occur in its declared base output")
-        if not locutor_span:
-            errors.append(f"{label}.locutor_span must be non-empty")
-        elif locutor_span not in normalized_text(locutor_path.read_text(encoding="utf-8")):
-            errors.append(f"{label}.locutor_span does not occur in its declared locutor output")
+        if whole_output_exclusion:
+            if locutor_span_value != "":
+                errors.append(
+                    f"{label}.locutor_span must be an empty string for a complete "
+                    "map-backed narration exclusion"
+                )
+        elif footnote_exclusion:
+            if locutor_span_value != "" and not locutor_span:
+                errors.append(
+                    f"{label}.locutor_span must be an empty string or a non-empty "
+                    "cleaned span for a footnote exclusion"
+                )
+            elif locutor_span and locutor_span not in normalized_text(
+                locutor_path.read_text(encoding="utf-8")
+            ):
+                errors.append(
+                    f"{label}.locutor_span does not occur in its declared locutor output"
+                )
+            if not require_text(entry.get("note_id")):
+                errors.append(f"{label}.note_id must be non-empty for a footnote exclusion")
+            if entry.get("note_part") not in {"content", "marker"}:
+                errors.append(
+                    f"{label}.note_part must be content or marker for a footnote exclusion"
+                )
+            if entry.get("note_part") == "content" and locutor_span_value != "":
+                errors.append(
+                    f"{label}.locutor_span must be an empty string for footnote content"
+                )
+        elif page_furniture_exclusion:
+            if locutor_span_value != "":
+                errors.append(
+                    f"{label}.locutor_span must be an empty string for a page furniture exclusion"
+                )
+            if not PAGE_FOLIO.fullmatch(base_span):
+                errors.append(
+                    f"{label}.base_span must be a standalone numeric printed folio"
+                )
+            elif base_span not in {
+                normalized_text(block)
+                for block in base_path.read_text(encoding="utf-8").split("\n\n")
+            }:
+                errors.append(
+                    f"{label}.base_span must be a standalone block in its declared base output"
+                )
+        elif supplementary_exclusion:
+            if locutor_span_value != "":
+                errors.append(
+                    f"{label}.locutor_span must be an empty string for a "
+                    "supplementary matter exclusion"
+                )
+            if entry.get("matter_kind") not in SUPPLEMENTARY_MATTER_KINDS:
+                errors.append(
+                    f"{label}.matter_kind must identify supported supplementary "
+                    "back matter"
+                )
+            base_text = normalized_text(base_path.read_text(encoding="utf-8"))
+            if base_span and not base_text.endswith(base_span):
+                errors.append(
+                    f"{label}.base_span must be a trailing span of its declared "
+                    "base output"
+                )
+        else:
+            if not locutor_span:
+                errors.append(f"{label}.locutor_span must be non-empty")
+            elif locutor_span not in normalized_text(locutor_path.read_text(encoding="utf-8")):
+                errors.append(f"{label}.locutor_span does not occur in its declared locutor output")
         if not require_text(entry.get("reason")):
             errors.append(f"{label}.reason must be non-empty")
         if not require_text(entry.get("reviewed_by")):
@@ -346,13 +588,19 @@ def _validate_changes(
             errors.append(f"{label}.logical_pages must contain positive integers")
         else:
             page_set = set(pages)
-            base_pages = {
-                source_page.get("logical_page")
-                for source_page in base_record.get("source_pages", [])
-                if isinstance(source_page, dict) and isinstance(source_page.get("logical_page"), int)
-            }
+            base_pages = _base_output_pages(base_record)
             if not page_set.issubset(base_pages):
                 errors.append(f"{label}.logical_pages are outside its declared base output")
+            if whole_output_exclusion:
+                if page_set != base_pages:
+                    errors.append(
+                        f"{label}.logical_pages must exactly cover the omitted base output"
+                    )
+                if not page_set or not page_set.issubset(narration_excluded_pages):
+                    errors.append(
+                        f"{label}.logical_pages must be fully covered by "
+                        "book-map ranges.narration_excluded"
+                    )
         if kind in ARCHAIC_CHANGE_KINDS:
             archaic_change_seen = True
             if mode != "archaic-modernized":
@@ -373,12 +621,52 @@ def _validate_changes(
                     f"{label} archaic modernization must match confirmed assessment evidence "
                     "by source span, logical page, and source_sha256"
                 )
-        if base_span and locutor_span:
+        if whole_output_exclusion:
+            base_text = normalized_text(base_path.read_text(encoding="utf-8"))
+            if base_span and base_text.count(base_span) != 1:
+                errors.append(
+                    f"{label}.base_span must occur exactly once in its omitted base output"
+                )
+            recorded = mapped_exclusions_by_output.setdefault(output_id, set())
+            if base_output_id in recorded:
+                errors.append(
+                    f"{label}.base_output_id has a duplicate complete mapped exclusion"
+                )
+            recorded.add(base_output_id)
+        elif base_span and (
+            locutor_span
+            or footnote_exclusion
+            or page_furniture_exclusion
+            or supplementary_exclusion
+        ):
             changes_by_output.setdefault(output_id, []).append(entry)
     if mode == "archaic-modernized" and not archaic_change_seen:
         errors.append("archaic-modernized narrator mode requires an archaic modernization change")
 
     for output_id, output in outputs_by_id.items():
+        if output.get("kind") == "full-book":
+            declared_base_ids = {
+                base.get("id")
+                for base in output.get("base_outputs", [])
+                if isinstance(base, dict) and isinstance(base.get("id"), str)
+            }
+            omitted_base_ids = set(base_outputs) - declared_base_ids
+            expected_exclusions = omitted_base_ids.intersection(
+                narration_excluded_base_ids
+            )
+            recorded_exclusions = mapped_exclusions_by_output.get(output_id, set())
+            missing_records = expected_exclusions - recorded_exclusions
+            if missing_records:
+                errors.append(
+                    f"narrator output {output_id} requires one mapped_exclusion "
+                    "change for each omitted map-backed base output"
+                )
+            unexpected_records = recorded_exclusions - expected_exclusions
+            if unexpected_records:
+                errors.append(
+                    f"narrator output {output_id} has a complete mapped_exclusion "
+                    "for a base output that was not omitted"
+                )
         locutor_path = resolve_under(text_root, output.get("locutor_file"), (Path("locutor"),))
         base_entries = output.get("base_outputs")
         if (
@@ -396,15 +684,15 @@ def _validate_changes(
             base_record = base_outputs.get(base_id)
             if not isinstance(base_record, dict):
                 continue
-            base_file = (
-                base_record.get("translation_file")
-                if "translation_file" in base_record
-                else base_record.get("source_file")
-            )
+            base_file, _base_sha256 = _base_file_and_hash(base_record)
             base_path = resolve_under(
                 text_root,
                 base_file,
-                (Path("source"), Path("translation") / TARGET_LANGUAGE),
+                (
+                    Path("source"),
+                    Path("translation") / TARGET_LANGUAGE,
+                    Path("fluid") / TARGET_LANGUAGE,
+                ),
             )
             if base_path is None or not base_path.is_file():
                 continue
@@ -423,6 +711,17 @@ def _validate_changes(
                 errors.append(
                     f"narrator change for {output_id} must use a unique base_span in {base_id}"
                 )
+                continue
+            if (
+                change.get("kind")
+                in {
+                    "footnote_exclusion",
+                    "page_furniture_exclusion",
+                    "supplementary_matter_exclusion",
+                }
+                and not locutor_span
+            ):
+                base_text_by_id[base_id] = base_text.replace(base_span, "", 1)
                 continue
             if locutor_text.count(locutor_span) != 1:
                 errors.append(
@@ -479,6 +778,11 @@ def validate_lineage(
     errors += base_errors
     if base_ledger_sha256 is not None and narrator_changes.get("base_ledger_sha256") != base_ledger_sha256:
         errors.append("narrator changes base_ledger_sha256 does not match its validated base ledger")
+    narration_excluded_pages = _narration_excluded_pages(book_map)
+    narration_excluded_base_ids = _narration_excluded_base_ids(
+        book_map,
+        base_outputs,
+    )
 
     analysis = book_map.get("analysis") if isinstance(book_map.get("analysis"), dict) else {}
     source_language = analysis.get("source_language")
@@ -502,6 +806,9 @@ def validate_lineage(
             errors.append(
                 "translated-pt-br narrator mode requires a whole source work with non-Portuguese source_language"
             )
+    elif mode == "fluid-pt-br":
+        if base_edition != "fluid-pt-br":
+            errors.append("fluid-pt-br narrator mode must derive from fluid-pt-br")
     elif mode == "faithful":
         if base_edition != "source":
             errors.append("faithful narrator mode must derive from source")
@@ -517,6 +824,7 @@ def validate_lineage(
         base_outputs,
         text_root,
         resolved_input,
+        narration_excluded_base_ids,
     )
     errors += output_errors
     outputs_by_id = {
@@ -532,6 +840,8 @@ def validate_lineage(
             text_root,
             mode,
             archaic_evidence,
+            narration_excluded_base_ids,
+            narration_excluded_pages,
         )
     if errors or selected is None and input_file is not None:
         return errors, None

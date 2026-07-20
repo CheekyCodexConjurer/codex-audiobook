@@ -24,6 +24,11 @@ from verify_translation_ledger import verify as verify_translation_ledger
 from verify_revision_ledger import TARGET_LANGUAGE as REVISION_LANGUAGE
 from verify_revision_ledger import revision_chapter_output_records
 from verify_revision_ledger import verify as verify_revision_ledger
+from verify_fluid_edition_ledger import FLUID_PROFILE
+from verify_fluid_edition_ledger import TARGET_LANGUAGE as FLUID_LANGUAGE
+from verify_fluid_edition_ledger import fluid_chapter_output_records
+from verify_fluid_edition_ledger import fluid_document_titles
+from verify_fluid_edition_ledger import verify as verify_fluid_edition_ledger
 
 
 FIGURE_ROLES = {"illustration", "facsimile"}
@@ -282,6 +287,7 @@ def build_translated_manifest(
     assets_manifest: dict,
     text_root: Path,
     visual_profile: str,
+    layout_path: Path | None,
 ) -> dict:
     source_outputs = chapter_output_records(ledger)
     translated_outputs = translation_chapter_output_records(translation_ledger)
@@ -399,6 +405,28 @@ def build_translated_manifest(
     }
     if visual_profile == "antique-paper":
         manifest["visual_profile"] = default_visual_profile()
+    if layout_path is not None:
+        layout = load_layout_json(layout_path)
+        errors = validate_layout(
+            layout,
+            book_root,
+            sha256_file(book_root / "metadata" / "book-map.json"),
+            sha256_file(book_root / "metadata" / "text-ledger.json"),
+            ledger,
+            [
+                document["id"]
+                for document in documents
+                if document.get("kind") != "source_cover"
+            ],
+            text_edition="translated-pt-br",
+            edition_ledger_sha256=sha256_file(
+                book_root / "metadata" / "translation-ledger.json"
+            ),
+            edition_outputs=translated_outputs,
+        )
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        manifest["layout"] = layout_descriptor(book_root, layout_path)
     return manifest
 
 
@@ -456,6 +484,112 @@ def build_revised_manifest(
     return manifest
 
 
+def build_fluid_manifest(
+    book_root: Path,
+    book_map: dict,
+    ledger: dict,
+    translation_ledger: dict | None,
+    fluid_style: dict,
+    fluid_ledger: dict,
+    assets_manifest: dict,
+    text_root: Path,
+    visual_profile: str,
+    layout_path: Path | None,
+) -> dict:
+    manifest = build_source_manifest(
+        book_root,
+        book_map,
+        ledger,
+        assets_manifest,
+        text_root,
+        visual_profile,
+        None,
+    )
+    fluid_outputs = fluid_chapter_output_records(fluid_ledger)
+    fluid_titles = fluid_document_titles(fluid_ledger)
+    translated_outputs = (
+        translation_chapter_output_records(translation_ledger)
+        if isinstance(translation_ledger, dict)
+        else {}
+    )
+    base_edition = fluid_ledger["base_edition"]
+    for document in manifest["documents"]:
+        if document.get("kind") == "source_cover":
+            continue
+        output_id = document["id"]
+        fluid_output = fluid_outputs.get(output_id)
+        if not isinstance(fluid_output, dict):
+            raise RuntimeError(f"Missing validated fluid output for {output_id!r}")
+        document["fluid_file"] = f"text/{fluid_output['fluid_file']}"
+        document["fluid_sha256"] = fluid_output["fluid_sha256"]
+        document["title"] = fluid_titles[output_id]
+        if base_edition == "translated-pt-br":
+            translated_output = translated_outputs.get(output_id)
+            if not isinstance(translated_output, dict):
+                raise RuntimeError(
+                    f"Missing validated translated base output for {output_id!r}"
+                )
+            document["translation_file"] = (
+                f"text/{translated_output['translation_file']}"
+            )
+            document["translation_sha256"] = translated_output[
+                "translation_sha256"
+            ]
+
+    edition = (
+        fluid_ledger.get("edition")
+        if isinstance(fluid_ledger.get("edition"), dict)
+        else {}
+    )
+    fluid_book = (
+        edition.get("book")
+        if isinstance(edition.get("book"), dict)
+        else {}
+    )
+    for field in ("title", "subtitle"):
+        value = fluid_book.get(field)
+        if isinstance(value, str):
+            manifest["book"][field] = value
+
+    fluid_style_path = book_root / "metadata" / "fluid-style.json"
+    fluid_ledger_path = book_root / "metadata" / "fluid-edition-ledger.json"
+    manifest["text_edition"] = "fluid-pt-br"
+    manifest["language"] = FLUID_LANGUAGE
+    manifest["profile"] = FLUID_PROFILE
+    manifest["base_edition"] = base_edition
+    manifest["base_ledger_sha256"] = fluid_ledger["base_ledger_sha256"]
+    manifest["fluid_style_sha256"] = sha256_file(fluid_style_path)
+    manifest["fluid_edition_ledger_sha256"] = sha256_file(fluid_ledger_path)
+    if base_edition == "translated-pt-br":
+        if not isinstance(translation_ledger, dict):
+            raise RuntimeError("Fluid translated base requires translation ledger")
+        manifest["source_language"] = translation_ledger["source_language"]
+        manifest["translation_ledger_sha256"] = sha256_file(
+            book_root / "metadata" / "translation-ledger.json"
+        )
+    if layout_path is not None:
+        layout = load_layout_json(layout_path)
+        errors = validate_layout(
+            layout,
+            book_root,
+            sha256_file(book_root / "metadata" / "book-map.json"),
+            sha256_file(book_root / "metadata" / "text-ledger.json"),
+            ledger,
+            [
+                document["id"]
+                for document in manifest["documents"]
+                if document.get("kind") != "source_cover"
+            ],
+            text_edition="fluid-pt-br",
+            edition_ledger_sha256=sha256_file(fluid_ledger_path),
+            edition_outputs=fluid_outputs,
+        )
+        if errors:
+            raise RuntimeError("; ".join(errors))
+        manifest["layout"] = layout_descriptor(book_root, layout_path)
+    return manifest
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build an Audiobook Codex EPUB manifest from verified source text.")
     parser.add_argument("--book-map", required=True, type=Path)
@@ -465,14 +599,24 @@ def main() -> None:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--translation-ledger", type=Path)
     parser.add_argument("--revision-ledger", type=Path)
+    parser.add_argument("--fluid-style", type=Path)
+    parser.add_argument("--fluid-ledger", type=Path)
     parser.add_argument(
         "--text-edition",
-        choices=("original", "revised-pt-br", "translated-pt-br"),
+        choices=("fluid-pt-br", "original", "revised-pt-br", "translated-pt-br"),
         default="original",
     )
     parser.add_argument("--layout", choices=("semantic", "legacy"))
     parser.add_argument("--epub-layout", type=Path)
-    parser.add_argument("--visual-profile", choices=("antique-paper", "none"), default="antique-paper")
+    parser.add_argument(
+        "--visual-profile",
+        choices=("antique-paper", "none"),
+        default="none",
+        help=(
+            "Legacy presentation compatibility only. New reader editions use the "
+            "ABNT title page and default to none."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -487,18 +631,32 @@ def main() -> None:
             "assets manifest": (assets_path, book_root / "metadata" / "assets-manifest.json"),
             "text root": (text_root, book_root / "text"),
         }
-        if args.text_edition == "translated-pt-br":
-            translation_path = (
-                args.translation_ledger.expanduser().resolve()
-                if args.translation_ledger
-                else book_root / "metadata" / "translation-ledger.json"
+        translation_path = None
+        fluid_style_path = None
+        fluid_ledger_path = None
+        if args.text_edition == "fluid-pt-br":
+            fluid_style_path = (
+                args.fluid_style.expanduser().resolve()
+                if args.fluid_style
+                else book_root / "metadata" / "fluid-style.json"
             )
-            canonical_paths["translation ledger"] = (
-                translation_path,
-                book_root / "metadata" / "translation-ledger.json",
+            fluid_ledger_path = (
+                args.fluid_ledger.expanduser().resolve()
+                if args.fluid_ledger
+                else book_root / "metadata" / "fluid-edition-ledger.json"
             )
-        else:
-            translation_path = None
+            canonical_paths["fluid style"] = (
+                fluid_style_path,
+                book_root / "metadata" / "fluid-style.json",
+            )
+            canonical_paths["fluid edition ledger"] = (
+                fluid_ledger_path,
+                book_root / "metadata" / "fluid-edition-ledger.json",
+            )
+        elif args.fluid_style is not None or args.fluid_ledger is not None:
+            raise RuntimeError(
+                "--fluid-style and --fluid-ledger require --text-edition fluid-pt-br"
+            )
         if args.text_edition == "revised-pt-br":
             revision_path = (
                 args.revision_ledger.expanduser().resolve()
@@ -511,24 +669,33 @@ def main() -> None:
             )
         else:
             revision_path = None
-        layout_mode = args.layout or ("legacy" if args.text_edition == "translated-pt-br" else "semantic")
-        if args.text_edition == "translated-pt-br":
-            if args.epub_layout is not None:
-                raise RuntimeError("translated-pt-br EPUB manifests do not support an original semantic EPUB layout")
-            layout_path = None
-        elif layout_mode == "semantic":
+        layout_mode = args.layout or "semantic"
+        if layout_mode == "semantic":
+            canonical_layout_path = book_root / "metadata" / (
+                "epub-layout.fluid.json"
+                if args.text_edition == "fluid-pt-br"
+                else (
+                    "epub-layout.pt-br.json"
+                    if args.text_edition == "translated-pt-br"
+                    else "epub-layout.json"
+                )
+            )
             layout_path = (
                 args.epub_layout.expanduser().resolve()
                 if args.epub_layout
-                else book_root / "metadata" / "epub-layout.json"
+                else canonical_layout_path
             )
             canonical_paths["EPUB layout"] = (
                 layout_path,
-                book_root / "metadata" / "epub-layout.json",
+                canonical_layout_path,
             )
         else:
             if args.epub_layout is not None:
                 raise RuntimeError("--epub-layout requires --layout semantic")
+            if args.text_edition == "translated-pt-br":
+                raise RuntimeError(
+                    "translated-pt-br EPUB manifests require a semantic EPUB layout"
+                )
             layout_path = None
         for label, (actual, expected) in canonical_paths.items():
             if actual != expected:
@@ -538,6 +705,50 @@ def main() -> None:
         assets_manifest = load_assets_json(assets_path)
         if not isinstance(book_map, dict) or not isinstance(ledger, dict) or not isinstance(assets_manifest, dict):
             raise RuntimeError("Book map, ledger, and assets manifest must be JSON objects.")
+        fluid_style = (
+            load_assets_json(fluid_style_path)
+            if fluid_style_path is not None
+            else None
+        )
+        fluid_ledger = (
+            load_assets_json(fluid_ledger_path)
+            if fluid_ledger_path is not None
+            else None
+        )
+        if args.text_edition == "fluid-pt-br":
+            if not isinstance(fluid_style, dict):
+                raise RuntimeError("Fluid style must be a JSON object.")
+            if not isinstance(fluid_ledger, dict):
+                raise RuntimeError("Fluid edition ledger must be a JSON object.")
+            if fluid_ledger.get("base_edition") == "translated-pt-br":
+                translation_path = (
+                    args.translation_ledger.expanduser().resolve()
+                    if args.translation_ledger
+                    else book_root / "metadata" / "translation-ledger.json"
+                )
+            elif args.translation_ledger is not None:
+                raise RuntimeError(
+                    "--translation-ledger is only valid for a translated fluid base"
+                )
+        elif args.text_edition == "translated-pt-br":
+            translation_path = (
+                args.translation_ledger.expanduser().resolve()
+                if args.translation_ledger
+                else book_root / "metadata" / "translation-ledger.json"
+            )
+        elif args.translation_ledger is not None:
+            raise RuntimeError(
+                "--translation-ledger requires translated-pt-br or a translated fluid base"
+            )
+        if translation_path is not None:
+            expected_translation_path = (
+                book_root / "metadata" / "translation-ledger.json"
+            )
+            if translation_path != expected_translation_path:
+                raise RuntimeError(
+                    "translation ledger must use the canonical path: "
+                    f"{expected_translation_path}"
+                )
         errors = validate_book_map(book_map, book_root, True, True)
         errors += verify_text_ledger(book_map, sha256_file(map_path), ledger, text_root, False, True)
         translation_ledger = None
@@ -546,14 +757,15 @@ def main() -> None:
             translation_ledger = load_assets_json(translation_path)
             if not isinstance(translation_ledger, dict):
                 raise RuntimeError("Translation ledger must be a JSON object.")
-            errors += verify_translation_ledger(
-                book_map,
-                sha256_file(map_path),
-                ledger,
-                sha256_file(ledger_path),
-                translation_ledger,
-                text_root,
-            )
+            if args.text_edition == "translated-pt-br":
+                errors += verify_translation_ledger(
+                    book_map,
+                    sha256_file(map_path),
+                    ledger,
+                    sha256_file(ledger_path),
+                    translation_ledger,
+                    text_root,
+                )
         if revision_path is not None:
             revision_ledger = load_assets_json(revision_path)
             if not isinstance(revision_ledger, dict):
@@ -566,6 +778,21 @@ def main() -> None:
                 revision_ledger,
                 text_root,
             )
+        if isinstance(fluid_style, dict) and isinstance(fluid_ledger, dict):
+            errors += verify_fluid_edition_ledger(
+                book_map,
+                sha256_file(map_path),
+                ledger,
+                sha256_file(ledger_path),
+                translation_ledger,
+                sha256_file(translation_path)
+                if translation_path is not None
+                else None,
+                fluid_style,
+                sha256_file(fluid_style_path),
+                fluid_ledger,
+                text_root,
+            )
         errors += validate_assets_manifest(assets_manifest, book_root, book_map, True)
         if errors:
             raise RuntimeError("; ".join(errors))
@@ -575,51 +802,67 @@ def main() -> None:
             else book_root
             / "metadata"
             / (
-                "epub-manifest.pt-br.json"
-                if args.text_edition == "translated-pt-br"
+                "epub-manifest.fluid.json"
+                if args.text_edition == "fluid-pt-br"
                 else (
-                    "epub-manifest.revised.json"
-                    if args.text_edition == "revised-pt-br"
-                    else "epub-manifest.json"
+                    "epub-manifest.pt-br.json"
+                    if args.text_edition == "translated-pt-br"
+                    else (
+                        "epub-manifest.revised.json"
+                        if args.text_edition == "revised-pt-br"
+                        else "epub-manifest.json"
+                    )
                 )
             )
         )
+        if args.text_edition == "fluid-pt-br":
+            manifest = build_fluid_manifest(
+                book_root,
+                book_map,
+                ledger,
+                translation_ledger,
+                fluid_style,
+                fluid_ledger,
+                assets_manifest,
+                text_root,
+                args.visual_profile,
+                layout_path,
+            )
+        elif args.text_edition == "translated-pt-br":
+            manifest = build_translated_manifest(
+                book_root,
+                book_map,
+                ledger,
+                translation_ledger,
+                assets_manifest,
+                text_root,
+                args.visual_profile,
+                layout_path,
+            )
+        elif args.text_edition == "revised-pt-br":
+            manifest = build_revised_manifest(
+                book_root,
+                book_map,
+                ledger,
+                revision_ledger,
+                assets_manifest,
+                text_root,
+                args.visual_profile,
+                layout_path,
+            )
+        else:
+            manifest = build_source_manifest(
+                book_root,
+                book_map,
+                ledger,
+                assets_manifest,
+                text_root,
+                args.visual_profile,
+                layout_path,
+            )
         write_json(
             output,
-            (
-                build_translated_manifest(
-                    book_root,
-                    book_map,
-                    ledger,
-                    translation_ledger,
-                    assets_manifest,
-                    text_root,
-                    args.visual_profile,
-                )
-                if translation_ledger is not None
-                else (
-                    build_revised_manifest(
-                        book_root,
-                        book_map,
-                        ledger,
-                        revision_ledger,
-                        assets_manifest,
-                        text_root,
-                        args.visual_profile,
-                        layout_path,
-                    )
-                    if revision_ledger is not None
-                    else build_source_manifest(
-                        book_root,
-                        book_map,
-                        ledger,
-                        assets_manifest,
-                        text_root,
-                        args.visual_profile,
-                        layout_path,
-                    )
-                )
-            ),
+            manifest,
         )
     except RuntimeError as error:
         print(f"Cannot build EPUB manifest: {error}", file=sys.stderr)

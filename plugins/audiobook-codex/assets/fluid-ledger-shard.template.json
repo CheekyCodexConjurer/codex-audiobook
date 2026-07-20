@@ -1,0 +1,44 @@
+{
+  "schema_version": "1.0",
+  "shard_kind": "fluid",
+  "claim_id": "FLUID-chapter-01",
+  "claim_sha256": "",
+  "producer": "audiobook-editor",
+  "verifier": "audiobook-verifier",
+  "order": 1,
+  "fluid": {
+    "chapter_outputs": [
+      {
+        "id": "chapter-01",
+        "base_file": "translation/pt-BR/chapters/chapter-01.txt",
+        "base_sha256": "",
+        "fluid_file": "fluid/pt-BR/chapters/chapter-01.txt",
+        "fluid_sha256": "",
+        "source_pages": [
+          {
+            "logical_page": 1,
+            "source_sha256": ""
+          }
+        ],
+        "base_block_count": 1,
+        "fluid_block_count": 1,
+        "reviewed_by": "audiobook-verifier"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "chapter-01-b0001",
+        "output_id": "chapter-01",
+        "position": 1,
+        "base_sha256": "",
+        "status": "included",
+        "fluid_position": 1,
+        "fluid_sha256": "",
+        "change_kinds": [
+          "fluency"
+        ],
+        "reviewed_by": "audiobook-verifier"
+      }
+    ]
+  }
+}

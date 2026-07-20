@@ -1,18 +1,18 @@
 {
   "name": "audiobook-codex",
-  "version": "0.6.0+codex.20260714200000",
-  "description": "Native-only Codex workflow for mapping books, preserving source text, reviewing natural PT-BR narrator text, optionally translating whole foreign-language books to PT-BR, exporting EPUB editions, and rendering local Chatterbox PT-BR audiobooks.",
+  "version": "0.8.0+codex.20260719153709",
+  "description": "Native-only Codex workflow for mapping books, preserving source text, translating whole foreign-language books, creating faithful fluid PT-BR reading editions, reviewing narrator text, exporting EPUB/PDF editions, and rendering local Chatterbox PT-BR audiobooks.",
   "author": {
     "name": "Matheus"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Audiobook Codex",
-    "shortDescription": "Map books, preserve assets, export EPUB, and render local audio.",
-    "longDescription": "A Codex-only audiobook workflow for PDF and EPUB sources. It uses native PDF and Computer Use capabilities when available, Codex agents for visual transcription and asset review, native image editing for opt-in reviewed derivatives, semantic EPUB packaging, and local Chatterbox PT-BR audio.",
+    "shortDescription": "Map, translate or fluid-edit books, export EPUB/PDF, and render audio.",
+    "longDescription": "A Codex-only audiobook workflow for PDF and EPUB sources. It uses native PDF and Computer Use capabilities when available, dedicated Codex agents for visual transcription, contextual PT-BR translation, faithful fluid PT-BR editing, ambiguity research, and verification, native image editing for opt-in reviewed derivatives, semantic EPUB/PDF packaging, and local Chatterbox PT-BR audio.",
     "developerName": "Matheus",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "$audiobook-codex stage=MAP native-only source{PDF|EPUB} library-root{E:\\Pessoal\\e-books} output{book-map.json|assets-manifest.json}"
+    "defaultPrompt": "$audiobook-codex stage=PHASE-1"
   }
 }

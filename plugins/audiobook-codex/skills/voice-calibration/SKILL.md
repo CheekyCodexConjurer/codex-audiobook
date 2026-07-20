@@ -6,7 +6,8 @@ description: Calibrate, compare, and promote a local audiobook TTS voice profile
 # Voice Calibration
 
 Use this skill before changing an official voice profile or local TTS renderer.
-Keep calibration artifacts outside Git under `E:\Pessoal\e-books\_voice-calibration-<profile-id>`.
+Keep calibration artifacts outside Git under `E:\Pessoal\Library\_voice-calibration-<profile-id>`.
+Historical promotion manifests and dated reports may retain `E:\Pessoal\e-books` paths only as immutable provenance from earlier calibrations; do not rewrite those paths or treat them as new workspace defaults.
 
 Read [protocol.md](references/protocol.md) before any calibration. Read
 [evidence-contract.md](references/evidence-contract.md) before importing targets,
@@ -78,6 +79,19 @@ engine, read [chatterbox-v3-pt-br.md](references/chatterbox-v3-pt-br.md).
    [promotion.template.json](assets/promotion.template.json). Update the production
    renderer only in a separately reviewed implementation step.
 
+## Repository Evidence Modes
+
+Routine `scripts\validate.ps1` runs the approved profile validators in `provenance`
+mode. It verifies promotion structure, declared SHA-256 values, report consistency,
+bundled voice bytes, and the profile values bound into the current renderer without
+requiring an old external calibration workspace to remain mounted.
+
+Before adding, replacing, or re-promoting an official voice profile, run
+`scripts\validate.ps1 -FullVoiceEvidence`. Full mode requires every retained corpus,
+selection, listening-review, smoke input, manifest, WAV, and MP3 to exist and match its
+declared hash. Provenance mode is repository-integrity validation only; it never replaces
+the full promotion gate.
+
 ## Current Chatterbox PT-BR
 
 For `chatterbox-multilingual-v3-pt-br`, use complete spoken locutions on separate
@@ -85,6 +99,6 @@ non-empty lines, with at most 320 characters per line. Expand digits and common
 abbreviations into PT-BR speech. Do not use brackets, SSML, Markdown, URLs, or email
 addresses in narrator input.
 
-The current official profile is `feminina-v1`. Its evidence is documented in
-`docs/voice-calibration/feminina-v1.md`; do not change its parameters merely because
+The approved profiles are `feminina-v1` and `masculina-v1`. Their evidence is
+documented under `docs/voice-calibration/`; do not change either profile merely because
 one new prompt scores higher.

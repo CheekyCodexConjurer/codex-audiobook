@@ -58,6 +58,20 @@ def test_numeric_marker_attached_to_full_date_is_linked_safely() -> None:
     assert 'href="#note-2"' not in html
 
 
+def test_numeric_marker_after_closed_citation_is_linked_without_matching_decimal() -> None:
+    html = note_reference_markup(
+        "Citação (AUTOR, 1900, p. 12).2 e decimal 1.2.",
+        {"2": "note-2"},
+    )
+
+    assert (
+        '(AUTOR, 1900, p. 12).<sup><a id="noteref-note-2" '
+        'epub:type="noteref" href="#note-2">2</a></sup>'
+    ) in html
+    assert "decimal 1.2" in html
+    assert html.count('href="#note-2"') == 1
+
+
 def test_cross_document_reference_and_backlink_targets() -> None:
     with tempfile.TemporaryDirectory() as raw_root:
         book_root = Path(raw_root)
@@ -169,6 +183,21 @@ def test_revised_semantic_note_text_preserves_reference_and_backlink() -> None:
     assert '<sup><a epub:type="backlink" href="#noteref-note-2">2</a></sup> Nota revisada.' in parts
 
 
+def test_semantic_quotation_uses_a_bilateral_block_style() -> None:
+    with tempfile.TemporaryDirectory() as raw_root:
+        book_root = Path(raw_root)
+        page = book_root / "text" / "source" / "pages" / "page-0001.txt"
+        page.parent.mkdir(parents=True)
+        page.write_text("Citação destacada.\n", encoding="utf-8")
+        parts = semantic_body_parts(
+            [block("quotation", 1, 1)],
+            book_root,
+            [],
+        )
+
+    assert parts == ['    <blockquote class="quotation"><p>Citação destacada.</p></blockquote>']
+
+
 def test_dialogue_and_verse_styles_use_requested_alignment() -> None:
     legacy_css = profile_stylesheet(None)
     antique_css = profile_stylesheet(default_visual_profile())
@@ -180,6 +209,12 @@ def test_dialogue_and_verse_styles_use_requested_alignment() -> None:
     assert (
         ".semantic-layout .dialogue { margin-left: 16%; text-align: right; "
         "text-indent: 0; font-style: italic; }"
+    ) in antique_css
+    assert ".quotation { margin: 0 16% 1rem; text-align: justify; }" in legacy_css
+    assert ".quotation p { margin: 0; text-indent: 0; }" in legacy_css
+    assert (
+        ".semantic-layout .quotation { margin: 0 16% 1.05rem; "
+        "text-align: justify; }"
     ) in antique_css
     assert ".verse { margin: 1.35rem auto; max-width: 100%; text-align: center; }" in legacy_css
     assert ".verse { margin: 1.55rem auto; max-width: 100%; text-align: center; }" in antique_css
@@ -226,9 +261,11 @@ def run_tests() -> None:
     test_note_reference_markup_links_only_attached_markers()
     test_attached_symbol_after_punctuation_is_linked()
     test_numeric_marker_attached_to_full_date_is_linked_safely()
+    test_numeric_marker_after_closed_citation_is_linked_without_matching_decimal()
     test_cross_document_reference_and_backlink_targets()
     test_semantic_blocks_emit_bidirectional_note_links_without_flattening_layout()
     test_revised_semantic_note_text_preserves_reference_and_backlink()
+    test_semantic_quotation_uses_a_bilateral_block_style()
     test_dialogue_and_verse_styles_use_requested_alignment()
     test_title_page_assets_follow_content_and_nav_is_named_sumario()
 

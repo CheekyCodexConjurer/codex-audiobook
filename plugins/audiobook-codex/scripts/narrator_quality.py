@@ -453,10 +453,15 @@ def _selected_output(
 
 
 def _ledger_records(book_root: Path, narrator_changes: dict) -> dict[str, dict]:
+    base_edition = narrator_changes.get("base_edition")
     ledger_name = (
         "translation-ledger.json"
-        if narrator_changes.get("base_edition") == "translated-pt-br"
-        else "text-ledger.json"
+        if base_edition == "translated-pt-br"
+        else (
+            "fluid-edition-ledger.json"
+            if base_edition == "fluid-pt-br"
+            else "text-ledger.json"
+        )
     )
     ledger = _load_json_object(book_root / "metadata" / ledger_name)
     outputs = ledger.get("chapter_outputs") if isinstance(ledger, dict) else None
@@ -488,14 +493,22 @@ def _base_texts_for_output(
         if not isinstance(record, dict):
             continue
         base_file = (
-            record.get("translation_file")
-            if "translation_file" in record
-            else record.get("source_file")
+            record.get("fluid_file")
+            if "fluid_file" in record
+            else (
+                record.get("translation_file")
+                if "translation_file" in record
+                else record.get("source_file")
+            )
         )
         base_path = resolve_under(
             text_root,
             base_file,
-            (Path("source"), Path("translation") / "pt-BR"),
+            (
+                Path("source"),
+                Path("translation") / "pt-BR",
+                Path("fluid") / "pt-BR",
+            ),
         )
         if base_path is not None and base_path.is_file():
             base_texts[base_id] = base_path.read_text(encoding="utf-8")
@@ -952,7 +965,11 @@ def narrator_output_pages(
     ledger_name = (
         "translation-ledger.json"
         if base_edition == "translated-pt-br"
-        else "text-ledger.json"
+        else (
+            "fluid-edition-ledger.json"
+            if base_edition == "fluid-pt-br"
+            else "text-ledger.json"
+        )
     )
     ledger_path = book_root / "metadata" / ledger_name
     try:

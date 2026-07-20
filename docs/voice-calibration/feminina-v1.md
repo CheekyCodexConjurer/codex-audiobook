@@ -2,9 +2,10 @@
 
 ## Status
 
-`feminina-v1` é o perfil oficial do renderizador local
-`chatterbox-multilingual-v3-pt-br`. Ele foi promovido por uma seleção com três
-textos, não apenas pela proximidade no prompt principal.
+`feminina-v1` é um perfil oficial alternativo do renderizador local
+`chatterbox-multilingual-v3-pt-br`; o padrão de produção é `masculina-v1`. O perfil
+feminino foi promovido por uma seleção com três textos, não apenas pela proximidade
+no prompt principal.
 
 Este documento registra a calibração concluída em 14 de julho de 2026. Ele não
 afirma que o Chatterbox reproduz exatamente a fonte em qualquer texto novo. A

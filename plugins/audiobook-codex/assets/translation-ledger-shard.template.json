@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "shard_kind": "translation",
+  "claim_id": "TRANSLATE-chapter-01",
+  "claim_sha256": "",
+  "producer": "audiobook-translator",
+  "verifier": "audiobook-verifier",
+  "order": 1,
+  "translation": {
+    "pages": [
+      {
+        "logical_page": 1,
+        "status": "verified",
+        "source_file": "source/pages/page-0001.txt",
+        "source_sha256": "",
+        "translation_file": "translation/pt-BR/pages/page-0001.txt",
+        "translation_sha256": "",
+        "translated_by": "audiobook-translator",
+        "reviewed_by": "audiobook-verifier",
+        "notes": ""
+      }
+    ],
+    "chapter_outputs": [
+      {
+        "id": "chapter-01",
+        "source_file": "source/chapters/chapter-01.txt",
+        "source_sha256": "",
+        "translation_file": "translation/pt-BR/chapters/chapter-01.txt",
+        "translation_sha256": "",
+        "source_pages": [
+          {
+            "logical_page": 1,
+            "source_sha256": ""
+          }
+        ],
+        "translated_by": "audiobook-translator",
+        "reviewed_by": "audiobook-verifier"
+      }
+    ],
+    "glossary_proposals": [
+      {
+        "id": "glossary-0001",
+        "term": "",
+        "proposal": "",
+        "reason": ""
+      }
+    ],
+    "ambiguities": [
+      {
+        "id": "ambiguity-0001",
+        "unit_id": "chapter-01",
+        "source_span": "",
+        "options": [],
+        "decision": "",
+        "evidence": ""
+      }
+    ]
+  }
+}

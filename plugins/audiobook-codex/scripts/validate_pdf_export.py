@@ -11,7 +11,10 @@ from epub_presentation import normalize_visual_profile
 from export_epub import (
     IMAGE_EDITIONS,
     TEXT_EDITIONS,
+    _comparison_text,
     _layout_text_values,
+    is_fluid_supplementary_document,
+    is_fluid_supplementary_title,
     load_export_context,
     normalize_space,
     paragraphs_from_text,
@@ -21,19 +24,93 @@ from export_epub import (
 )
 
 
+_URL_FRAGMENT = re.compile(r"^(?:https?://|www\.)\S+$", re.IGNORECASE)
+
+
+class PdfValidationContext:
+    def __init__(self, reader: object) -> None:
+        self.reader = reader
+        self._page_text: dict[int, str] = {}
+        self._page_text_without_numbers: dict[int, str] = {}
+
+    @property
+    def page_count(self) -> int:
+        return len(self.reader.pages)
+
+    def page_text(self, page_index: int) -> str:
+        if page_index not in self._page_text:
+            self._page_text[page_index] = (
+                self.reader.pages[page_index].extract_text() or ""
+            )
+        return self._page_text[page_index]
+
+    def page_text_without_number(self, page_index: int) -> str:
+        if page_index not in self._page_text_without_numbers:
+            self._page_text_without_numbers[page_index] = _without_pdf_page_number(
+                self.page_text(page_index),
+                page_index + 1,
+            )
+        return self._page_text_without_numbers[page_index]
+
+    def extracted_text(self) -> str:
+        return "\n".join(
+            self.page_text_without_number(page_index)
+            for page_index in range(self.page_count)
+        )
+
+
+def _find_fragment_ignoring_whitespace(
+    value: str,
+    fragment: str,
+    start: int,
+) -> tuple[int, int]:
+    pattern = r"\s*".join(re.escape(character) for character in fragment)
+    match = re.search(pattern, value[start:])
+    if match is None:
+        return -1, -1
+    return start + match.start(), start + match.end()
+
+
+def _without_pdf_page_number(value: str, page_number: int) -> str:
+    lines = value.splitlines()
+    target = str(page_number)
+    nonempty_indexes = [
+        index for index, line in enumerate(lines) if line.strip()
+    ]
+    for index in reversed(nonempty_indexes[-1:]):
+        if lines[index].strip() == target:
+            del lines[index]
+            return "\n".join(lines)
+    for index in nonempty_indexes[:1]:
+        if lines[index].strip() == target:
+            del lines[index]
+            break
+    return "\n".join(lines)
+
+
 def _expected_fragments(
     book_root: Path,
     documents: list[dict],
+    text_edition: str,
 ) -> tuple[list[str], list[str]]:
     ordered_fragments: list[str] = []
     note_fragments: list[str] = []
     for document in documents:
         if document.get("kind") == "source_cover":
             continue
+        if (
+            text_edition == "fluid-pt-br"
+            and is_fluid_supplementary_document(document)
+        ):
+            continue
         blocks = document.get("_layout_blocks")
         if not isinstance(blocks, list):
             text = document["_text_path"].read_text(encoding="utf-8")
-            heading, paragraphs = paragraphs_from_text(text, str(document["title"]))
+            heading, paragraphs = paragraphs_from_text(
+                text,
+                str(document["title"]),
+                allow_leading_chapter_label=document.get("kind") == "chapter",
+            )
             ordered_fragments.extend([heading, *paragraphs])
             continue
         changes = document.get("_revision_changes") or []
@@ -45,6 +122,12 @@ def _expected_fragments(
                 changes,
                 applied_revision_ids,
             )
+            if (
+                text_edition == "fluid-pt-br"
+                and block.get("kind") == "heading"
+                and any(is_fluid_supplementary_title(value) for value in values)
+            ):
+                break
             target = (
                 note_fragments
                 if block.get("kind") == "note"
@@ -80,20 +163,23 @@ def validate_pdf_text(
     pdf_path: Path,
     ordered_fragments: list[str],
     note_fragments: list[str],
+    context: PdfValidationContext | None = None,
 ) -> list[str]:
+    if context is None:
+        try:
+            from pypdf import PdfReader
+        except ImportError as error:
+            return [
+                "pypdf is required for PDF validation. Run this script with the Codex bundled Python."
+            ]
+        try:
+            context = PdfValidationContext(PdfReader(str(pdf_path)))
+        except Exception as error:
+            return [f"Cannot extract PDF text: {error}"]
     try:
-        from pypdf import PdfReader
-    except ImportError as error:
-        return [
-            "pypdf is required for PDF validation. Run this script with the Codex bundled Python."
-        ]
-    try:
-        extracted = "\n".join(
-            page.extract_text() or "" for page in PdfReader(str(pdf_path)).pages
-        )
+        extracted = context.extracted_text()
     except Exception as error:
         return [f"Cannot extract PDF text: {error}"]
-    extracted = re.sub(r"(?m)^\s*\d+\s*$", "", extracted)
     normalized = normalize_space(extracted)
     errors: list[str] = []
     for fragment in note_fragments:
@@ -111,7 +197,14 @@ def validate_pdf_text(
         )
     cursor = 0
     for fragment in ordered_fragments:
-        if len(fragment) < 40:
+        fragment_end = -1
+        if _URL_FRAGMENT.fullmatch(fragment):
+            position, fragment_end = _find_fragment_ignoring_whitespace(
+                normalized,
+                fragment,
+                cursor,
+            )
+        elif len(fragment) < 40:
             position = normalized.find(fragment)
         else:
             position = normalized.find(fragment, cursor)
@@ -123,41 +216,27 @@ def validate_pdf_text(
             if len(errors) >= 20:
                 break
             continue
-        if len(fragment) >= 40:
+        if fragment_end >= 0:
+            cursor = fragment_end
+        elif len(fragment) >= 40:
             cursor = position + len(fragment)
     return errors
 
 
-def expected_outline_titles(book_root: Path, documents: list[dict]) -> list[str]:
-    titles: list[str] = []
-    for document in documents:
-        if document.get("kind") == "source_cover":
-            continue
-        blocks = document.get("_layout_blocks")
-        if isinstance(blocks, list):
-            heading = next(
-                (
-                    block
-                    for block in blocks
-                    if isinstance(block, dict) and block.get("kind") == "heading"
-                ),
-                None,
-            )
-            if heading is not None:
-                titles.append(
-                    normalize_space(
-                        " ".join(
-                            _layout_text_values(
-                                heading,
-                                book_root,
-                                document.get("_revision_changes") or [],
-                            )
-                        )
-                    )
-                )
-                continue
-        titles.append(normalize_space(str(document["title"])))
-    return titles
+def expected_outline_titles(
+    _book_root: Path,
+    documents: list[dict],
+    text_edition: str,
+) -> list[str]:
+    return [
+        normalize_space(str(document["title"]))
+        for document in documents
+        if document.get("kind") != "source_cover"
+        and (
+            text_edition != "fluid-pt-br"
+            or not is_fluid_supplementary_document(document)
+        )
+    ]
 
 
 def validate_outline(reader: object, expected_titles: list[str]) -> list[str]:
@@ -166,11 +245,69 @@ def validate_outline(reader: object, expected_titles: list[str]) -> list[str]:
         for item in reader.outline
         if not isinstance(item, list)
     ]
-    if actual_titles and actual_titles[0] == "Sumário":
+    if actual_titles and actual_titles[0].casefold() == "Sumário".casefold():
         actual_titles = actual_titles[1:]
     if actual_titles != expected_titles:
         return ["PDF outline does not preserve the validated document order"]
     return []
+
+
+def validate_legacy_heading_uniqueness(
+    reader: object,
+    documents: list[dict],
+    context: PdfValidationContext | None = None,
+) -> list[str]:
+    outline_items = [
+        item for item in reader.outline if not isinstance(item, list)
+    ]
+    if (
+        outline_items
+        and normalize_space(str(getattr(outline_items[0], "title", ""))).casefold()
+        == "Sumário".casefold()
+    ):
+        outline_items = outline_items[1:]
+    content_documents = [
+        document for document in documents if document.get("kind") != "source_cover"
+    ]
+    if len(outline_items) != len(content_documents):
+        return []
+
+    errors: list[str] = []
+    for document, outline_item in zip(content_documents, outline_items):
+        if (
+            document.get("kind") != "chapter"
+            or isinstance(document.get("_layout_blocks"), list)
+        ):
+            continue
+        title = normalize_space(str(document["title"]))
+        heading, _paragraphs = paragraphs_from_text(
+            document["_text_path"].read_text(encoding="utf-8"),
+            title,
+            allow_leading_chapter_label=True,
+        )
+        try:
+            page_index = reader.get_destination_page_number(outline_item)
+            page_text = (
+                context.page_text(page_index)
+                if context is not None
+                else reader.pages[page_index].extract_text() or ""
+            )
+        except Exception as error:
+            errors.append(
+                f"Cannot inspect legacy PDF chapter heading {title!r}: {error}"
+            )
+            continue
+        normalized_page = normalize_space(
+            _without_pdf_page_number(page_text, page_index + 1)
+        )
+        if not _comparison_text(normalized_page).startswith(
+            _comparison_text(heading)
+        ):
+            errors.append(
+                "PDF legacy chapter heading does not match the content at its "
+                f"outline destination: {title}"
+            )
+    return errors
 
 
 def validate_sidecar(
@@ -231,6 +368,30 @@ def validate_sidecar(
             errors.append(
                 "PDF export sidecar revision ledger hash does not match manifest"
             )
+    elif text_edition == "fluid-pt-br":
+        for key in (
+            "base_edition",
+            "base_ledger_sha256",
+            "fluid_style_sha256",
+            "fluid_edition_ledger_sha256",
+            "profile",
+        ):
+            if sidecar.get(key) != manifest.get(key):
+                errors.append(
+                    f"PDF export sidecar {key} does not match fluid manifest"
+                )
+        if manifest.get("base_edition") == "translated-pt-br":
+            if sidecar.get("source_language") != manifest.get("source_language"):
+                errors.append(
+                    "PDF export sidecar source_language does not match fluid manifest"
+                )
+            if sidecar.get("translation_ledger_sha256") != manifest.get(
+                "translation_ledger_sha256"
+            ):
+                errors.append(
+                    "PDF export sidecar translation ledger hash does not match "
+                    "the fluid base"
+                )
     if manifest.get("layout") is not None:
         if sidecar.get("layout") != manifest.get("layout"):
             errors.append("PDF export sidecar layout does not match manifest")
@@ -293,12 +454,16 @@ def main() -> None:
             else book_root
             / "metadata"
             / (
-                "epub-manifest.pt-br.json"
-                if args.text_edition == "translated-pt-br"
+                "epub-manifest.fluid.json"
+                if args.text_edition == "fluid-pt-br"
                 else (
-                    "epub-manifest.revised.json"
-                    if args.text_edition == "revised-pt-br"
-                    else "epub-manifest.json"
+                    "epub-manifest.pt-br.json"
+                    if args.text_edition == "translated-pt-br"
+                    else (
+                        "epub-manifest.revised.json"
+                        if args.text_edition == "revised-pt-br"
+                        else "epub-manifest.json"
+                    )
                 )
             )
         )
@@ -316,6 +481,8 @@ def main() -> None:
             _ledger_path,
             translation_ledger,
             revision_ledger,
+            _fluid_style,
+            fluid_ledger,
             layout,
         ) = load_export_context(
             book_root,
@@ -331,10 +498,12 @@ def main() -> None:
             args.text_edition,
             translation_ledger,
             revision_ledger,
+            fluid_ledger,
             layout,
         )
         reader = PdfReader(str(pdf_path))
-        page_count = len(reader.pages)
+        pdf_context = PdfValidationContext(reader)
+        page_count = pdf_context.page_count
         errors = []
         if page_count <= 0:
             errors.append("PDF export must contain at least one page")
@@ -342,9 +511,17 @@ def main() -> None:
         title = str((manifest.get("book") or {}).get("title") or "")
         if title and str(metadata.title or "") != title:
             errors.append("PDF metadata title does not match manifest")
-        ordered_fragments, note_fragments = _expected_fragments(book_root, documents)
-        errors += validate_pdf_text(pdf_path, ordered_fragments, note_fragments)
-        errors += validate_outline(reader, expected_outline_titles(book_root, documents))
+        ordered_fragments, note_fragments = _expected_fragments(
+            book_root,
+            documents,
+            args.text_edition,
+        )
+        errors += validate_pdf_text(pdf_path, ordered_fragments, note_fragments, pdf_context)
+        errors += validate_outline(
+            reader,
+            expected_outline_titles(book_root, documents, args.text_edition),
+        )
+        errors += validate_legacy_heading_uniqueness(reader, documents, pdf_context)
         expected_assets: list[dict] = []
         seen_asset_ids: set[str] = set()
         for document in documents:
