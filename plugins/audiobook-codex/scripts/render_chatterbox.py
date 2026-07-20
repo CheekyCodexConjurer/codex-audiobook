@@ -42,6 +42,10 @@ DEFAULT_REFERENCE_VOICE = (
     Path(__file__).resolve().parent.parent / "assets" / "voices" / "Feminina.mp3"
 )
 DEFAULT_REFERENCE_VOICE_SHA256 = "20d890c2a97bc2dd97b4ea4021e83681c00830c7b2e8894f944776e44eacde9f"
+MASCULINA_REFERENCE_VOICE = (
+    Path(__file__).resolve().parent.parent / "assets" / "voices" / "Masculina.mp3"
+)
+MASCULINA_REFERENCE_VOICE_SHA256 = "d660006b44018d1e3e4d2aeb287109f53df20810322cceac558b5a8cc44797c3"
 MODEL_ID = "ResembleAI/Chatterbox-Multilingual-pt-br"
 MODEL_LANGUAGE_ID = "pt"
 FEMININA_PROFILE_NAME = "feminina-v1"
@@ -71,8 +75,57 @@ FEMININA_PROFILE_CALIBRATION = {
     },
     "chatterbox_tts_version": "0.1.7",
 }
+MASCULINA_PROFILE_NAME = "masculina-v1"
+MASCULINA_PROFILE = {
+    "max_chars": DEFAULT_MAX_CHARS,
+    "silence_seconds": SILENCE_SECONDS,
+    "exaggeration": 0.5,
+    "cfg_weight": 0.35,
+    "temperature": 0.8,
+    "repetition_penalty": 1.2,
+    "min_p": 0.05,
+    "top_p": 1.0,
+    "seed": 54321,
+}
+MASCULINA_PROFILE_CALIBRATION = {
+    "selection_id": "final-selection-2026-07-17",
+    "selection_sha256": "7118511e73ef93e29e3187302a324d975b0068b5cb0c1777aea4f53e64e4ce88",
+    "corpus_sha256": "bd45c68e3b5fbdc64079e90a71cdd2263f637eaa584052ff0ed273ba7fc64dff",
+    "winner_id": "seed54321-base",
+    "main_prompt_wav_sha256": "9e7dded736aa1d8abfc39a5946551e5543f88e332e775165d309e8a11f015eed",
+    "device": "cuda",
+    "model_root": str(DEFAULT_MODEL_ROOT),
+    "model": {
+        "t3_sha256": "074aaf65255eb9cb960288f7cc72e09d3b5008f6e0b14868c0d4e5b0bd7cbb6c",
+        "s3gen_sha256": "f7abce4b196dae2d08d9296cbebc6521b046079577643b42a19a03499d08721e",
+        "voice_encoder_sha256": "4b16d836bc598509860f6fa068165a8bb5e9ac84f05582dfcf278a5a372879f1",
+    },
+    "chatterbox_tts_version": "0.1.7",
+}
+PRECOMPUTED_CONDITIONALS_STRATEGY = "precomputed-conditionals-seed-before-model-v1"
+AUDIO_PROMPT_PER_GENERATE_STRATEGY = "audio-prompt-per-generate-v1"
+PER_SEGMENT_INDEX_SEED_STRATEGY = "per-segment-index-v1"
+FIXED_PER_SEGMENT_SEED_STRATEGY = "fixed-per-segment-v1"
+VOICE_PROFILES = {
+    FEMININA_PROFILE_NAME: {
+        "reference": DEFAULT_REFERENCE_VOICE,
+        "reference_sha256": DEFAULT_REFERENCE_VOICE_SHA256,
+        "parameters": FEMININA_PROFILE,
+        "calibration": FEMININA_PROFILE_CALIBRATION,
+        "conditioning_strategy": PRECOMPUTED_CONDITIONALS_STRATEGY,
+        "seed_strategy": PER_SEGMENT_INDEX_SEED_STRATEGY,
+    },
+    MASCULINA_PROFILE_NAME: {
+        "reference": MASCULINA_REFERENCE_VOICE,
+        "reference_sha256": MASCULINA_REFERENCE_VOICE_SHA256,
+        "parameters": MASCULINA_PROFILE,
+        "calibration": MASCULINA_PROFILE_CALIBRATION,
+        "conditioning_strategy": AUDIO_PROMPT_PER_GENERATE_STRATEGY,
+        "seed_strategy": FIXED_PER_SEGMENT_SEED_STRATEGY,
+    },
+}
 RENDER_JOURNAL_SCHEMA_VERSION = "2.0"
-RENDER_SEED_STRATEGY = "per-segment-index-v1"
+RENDER_SEED_STRATEGY = PER_SEGMENT_INDEX_SEED_STRATEGY
 RENDER_RETRY_ATTEMPTS = 3
 RENDER_RETRY_SEED_STEP = 1_000_003
 EXPECTED_WAV_PARAMS = (CHANNELS, SAMPLE_WIDTH, SAMPLE_RATE)
@@ -122,6 +175,8 @@ def read_json(path: Path, label: str) -> object:
 def render_identity(
     args: argparse.Namespace,
     profile: str,
+    conditioning_strategy: str,
+    seed_strategy: str,
     model_hashes: dict[str, str],
     package_version: str | None,
     voice_reference_sha256: str,
@@ -143,6 +198,7 @@ def render_identity(
         "model_language_id": MODEL_LANGUAGE_ID,
         "device": device,
         "sample_rate": SAMPLE_RATE,
+        "conditioning_strategy": conditioning_strategy,
         "text_policy": {
             "name": "line-delimited-v1",
             "max_chars": args.max_chars,
@@ -155,7 +211,7 @@ def render_identity(
             "min_p": args.min_p,
             "top_p": args.top_p,
             "seed": args.seed,
-            "seed_strategy": RENDER_SEED_STRATEGY,
+            "seed_strategy": seed_strategy,
         },
     }
 
@@ -296,8 +352,18 @@ def wav_details(path: Path) -> tuple[float, str]:
     return frames / SAMPLE_RATE, sha256_file(path)
 
 
-def segment_seed(seed: int | None, index: int) -> int | None:
-    return None if seed is None else seed + index - 1
+def segment_seed(
+    seed: int | None,
+    index: int,
+    seed_strategy: str = RENDER_SEED_STRATEGY,
+) -> int | None:
+    if seed is None:
+        return None
+    if seed_strategy == FIXED_PER_SEGMENT_SEED_STRATEGY:
+        return seed
+    if seed_strategy == PER_SEGMENT_INDEX_SEED_STRATEGY:
+        return seed + index - 1
+    raise RuntimeError(f"Unsupported render seed strategy: {seed_strategy}")
 
 
 def render_retry_seed(seed: int | None, index: int, attempt_offset: int) -> int | None:
@@ -526,6 +592,7 @@ def render_segment_atomically(
     text: str,
     target: Path,
     voice_reference: Path,
+    conditioning_strategy: str,
     exaggeration: float,
     cfg_weight: float,
     temperature: float,
@@ -540,6 +607,7 @@ def render_segment_atomically(
             text,
             temporary,
             voice_reference,
+            conditioning_strategy,
             exaggeration,
             cfg_weight,
             temperature,
@@ -563,6 +631,7 @@ def render_segment_with_retries(
     text: str,
     target: Path,
     voice_reference: Path,
+    conditioning_strategy: str,
     exaggeration: float,
     cfg_weight: float,
     temperature: float,
@@ -571,18 +640,21 @@ def render_segment_with_retries(
     top_p: float,
     seed: int | None,
     device: str,
+    skip_initial_seed: bool = False,
 ) -> tuple[int | None, list[dict]]:
     attempts: list[dict] = []
     for attempt_offset in range(RENDER_RETRY_ATTEMPTS):
         attempt_number = attempt_offset + 1
         attempt_seed = render_retry_seed(seed, segment_index, attempt_offset)
-        seed_torch(attempt_seed, device)
+        if not (skip_initial_seed and attempt_offset == 0):
+            seed_torch(attempt_seed, device)
         try:
             speech = render_segment_atomically(
                 model,
                 text,
                 target,
                 voice_reference,
+                conditioning_strategy,
                 exaggeration,
                 cfg_weight,
                 temperature,
@@ -1072,27 +1144,31 @@ def selected_profile(
         args.top_p,
         args.seed,
     )
-    expected_values = (
-        FEMININA_PROFILE["max_chars"],
-        FEMININA_PROFILE["silence_seconds"],
-        FEMININA_PROFILE["exaggeration"],
-        FEMININA_PROFILE["cfg_weight"],
-        FEMININA_PROFILE["temperature"],
-        FEMININA_PROFILE["repetition_penalty"],
-        FEMININA_PROFILE["min_p"],
-        FEMININA_PROFILE["top_p"],
-        FEMININA_PROFILE["seed"],
-    )
-    if (
-        voice_reference == DEFAULT_REFERENCE_VOICE.resolve()
-        and sha256_file(voice_reference) == DEFAULT_REFERENCE_VOICE_SHA256
-        and model_root == DEFAULT_MODEL_ROOT.resolve()
-        and device == FEMININA_PROFILE_CALIBRATION["device"]
-        and model_hashes == FEMININA_PROFILE_CALIBRATION["model"]
-        and package_version == FEMININA_PROFILE_CALIBRATION["chatterbox_tts_version"]
-        and profile_values == expected_values
-    ):
-        return FEMININA_PROFILE_NAME
+    for profile_name, definition in VOICE_PROFILES.items():
+        parameters = definition["parameters"]
+        calibration = definition["calibration"]
+        reference = definition["reference"]
+        expected_values = (
+            parameters["max_chars"],
+            parameters["silence_seconds"],
+            parameters["exaggeration"],
+            parameters["cfg_weight"],
+            parameters["temperature"],
+            parameters["repetition_penalty"],
+            parameters["min_p"],
+            parameters["top_p"],
+            parameters["seed"],
+        )
+        if (
+            voice_reference == reference.resolve()
+            and sha256_file(voice_reference) == definition["reference_sha256"]
+            and model_root == DEFAULT_MODEL_ROOT.resolve()
+            and device == calibration["device"]
+            and model_hashes == calibration["model"]
+            and package_version == calibration["chatterbox_tts_version"]
+            and profile_values == expected_values
+        ):
+            return profile_name
     return "custom"
 
 
@@ -1101,6 +1177,7 @@ def render_segment(
     text: str,
     target: Path,
     voice_reference: Path,
+    conditioning_strategy: str,
     exaggeration: float,
     cfg_weight: float,
     temperature: float,
@@ -1112,17 +1189,20 @@ def render_segment(
         import numpy as np
     except ImportError as error:
         raise RuntimeError("numpy is required for Chatterbox rendering.") from error
-    waveform = model.generate(
-        text,
-        language_id=MODEL_LANGUAGE_ID,
-        audio_prompt_path=str(voice_reference),
-        exaggeration=exaggeration,
-        cfg_weight=cfg_weight,
-        temperature=temperature,
-        repetition_penalty=repetition_penalty,
-        min_p=min_p,
-        top_p=top_p,
-    )
+    generation = {
+        "language_id": MODEL_LANGUAGE_ID,
+        "exaggeration": exaggeration,
+        "cfg_weight": cfg_weight,
+        "temperature": temperature,
+        "repetition_penalty": repetition_penalty,
+        "min_p": min_p,
+        "top_p": top_p,
+    }
+    if conditioning_strategy == AUDIO_PROMPT_PER_GENERATE_STRATEGY:
+        generation["audio_prompt_path"] = str(voice_reference)
+    elif conditioning_strategy != PRECOMPUTED_CONDITIONALS_STRATEGY:
+        raise RuntimeError(f"Unsupported conditioning strategy: {conditioning_strategy}")
+    waveform = model.generate(text, **generation)
     if hasattr(waveform, "detach"):
         waveform = waveform.detach().cpu().numpy()
     samples = np.asarray(waveform, dtype=np.float32).reshape(-1)
@@ -1154,6 +1234,14 @@ def main() -> None:
     parser.add_argument("--narrator-review", type=Path)
     parser.add_argument("--require-quality", action="store_true")
     parser.add_argument("--model-root", type=Path, default=DEFAULT_MODEL_ROOT)
+    parser.add_argument(
+        "--voice-profile",
+        choices=tuple(sorted(VOICE_PROFILES)),
+        help=(
+            "Use one immutable calibrated voice reference and its complete parameter set. "
+            "Cannot be combined with individual voice or generation overrides."
+        ),
+    )
     parser.add_argument("--voice-reference", type=Path, default=DEFAULT_REFERENCE_VOICE)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--format", choices=("wav", "m4a", "mp3"), default="mp3")
@@ -1182,6 +1270,30 @@ def main() -> None:
     )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
+
+    if args.voice_profile is not None:
+        profile_override_flags = {
+            "--voice-reference",
+            "--max-chars",
+            "--silence-seconds",
+            "--exaggeration",
+            "--cfg-weight",
+            "--temperature",
+            "--repetition-penalty",
+            "--min-p",
+            "--top-p",
+            "--seed",
+        }
+        conflicting = sorted(profile_override_flags.intersection(sys.argv[1:]))
+        if conflicting:
+            raise SystemExit(
+                "--voice-profile cannot be combined with individual profile overrides: "
+                + ", ".join(conflicting)
+            )
+        definition = VOICE_PROFILES[args.voice_profile]
+        args.voice_reference = definition["reference"]
+        for name, value in definition["parameters"].items():
+            setattr(args, name, value)
 
     if not 80 <= args.max_chars <= DEFAULT_MAX_CHARS:
         raise SystemExit(f"--max-chars must be between 80 and {DEFAULT_MAX_CHARS}.")
@@ -1357,6 +1469,8 @@ def main() -> None:
             model_hashes = {}
             package_version = None
             profile = ""
+            conditioning_strategy = ""
+            seed_strategy = RENDER_SEED_STRATEGY
             voice_reference_sha256 = ""
             identity = None
         else:
@@ -1376,10 +1490,22 @@ def main() -> None:
                 model_hashes,
                 package_version,
             )
+            conditioning_strategy = (
+                VOICE_PROFILES[profile]["conditioning_strategy"]
+                if profile in VOICE_PROFILES
+                else AUDIO_PROMPT_PER_GENERATE_STRATEGY
+            )
+            seed_strategy = (
+                VOICE_PROFILES[profile]["seed_strategy"]
+                if profile in VOICE_PROFILES
+                else RENDER_SEED_STRATEGY
+            )
             voice_reference_sha256 = sha256_file(voice_reference)
             identity = render_identity(
                 args,
                 profile,
+                conditioning_strategy,
+                seed_strategy,
                 model_hashes,
                 package_version,
                 voice_reference_sha256,
@@ -1453,6 +1579,14 @@ def main() -> None:
             existing_manifest = read_json(manifest_path, "audio manifest")
             if not isinstance(existing_manifest, dict):
                 raise RuntimeError("--remount requires an existing audio manifest object.")
+            seed_strategy = existing_manifest.get("seed_strategy", RENDER_SEED_STRATEGY)
+            if not isinstance(seed_strategy, str) or seed_strategy not in {
+                FIXED_PER_SEGMENT_SEED_STRATEGY,
+                PER_SEGMENT_INDEX_SEED_STRATEGY,
+            }:
+                raise RuntimeError(
+                    f"--remount found an unsupported render seed strategy: {seed_strategy}"
+                )
 
         journal_records = dict(previous_records)
         if not args.remount:
@@ -1514,7 +1648,7 @@ def main() -> None:
                     )
                 reused_segments += 1
             else:
-                seed = segment_seed(args.seed, index)
+                seed = segment_seed(args.seed, index, seed_strategy)
                 if not (
                     selected_chapter_ids and args.overwrite
                 ) and reusable_segment_record(
@@ -1534,8 +1668,17 @@ def main() -> None:
                         seed = source_record["seed"]
                         reused_segments += 1
                     else:
+                        skip_initial_seed = False
                         if model is None:
+                            if conditioning_strategy == PRECOMPUTED_CONDITIONALS_STRATEGY:
+                                seed_torch(args.seed, device)
                             model = load_ptbr_model(model_root, device, runtime_paths)
+                            if conditioning_strategy == PRECOMPUTED_CONDITIONALS_STRATEGY:
+                                model.prepare_conditionals(
+                                    str(voice_reference),
+                                    exaggeration=args.exaggeration,
+                                )
+                                skip_initial_seed = index == 1 and seed == args.seed
                         try:
                             seed, render_attempts = render_segment_with_retries(
                                 segment_index=index,
@@ -1543,6 +1686,7 @@ def main() -> None:
                                 text=segment.text,
                                 target=segment_path,
                                 voice_reference=voice_reference,
+                                conditioning_strategy=conditioning_strategy,
                                 exaggeration=args.exaggeration,
                                 cfg_weight=args.cfg_weight,
                                 temperature=args.temperature,
@@ -1551,6 +1695,7 @@ def main() -> None:
                                 top_p=args.top_p,
                                 seed=seed,
                                 device=device,
+                                skip_initial_seed=skip_initial_seed,
                             )
                         except RuntimeError as error:
                             raise RuntimeError(
@@ -1570,7 +1715,7 @@ def main() -> None:
             if not args.remount and reflow_source is not None:
                 record["reused_from"] = reflow_reuse_provenance(
                     reflow_source[0],
-                    segment_seed(args.seed, index),
+                    segment_seed(args.seed, index, seed_strategy),
                 )
             segment_records.append(record)
             if not args.remount:
@@ -1605,7 +1750,7 @@ def main() -> None:
                     segment,
                     segments_dir / f"segment-{segment.line_number:04d}.wav",
                     output_dir,
-                    segment_seed(args.seed, segment.line_number),
+                    segment_seed(args.seed, segment.line_number, seed_strategy),
                 )
                 for segment in all_segments
             )
@@ -1712,6 +1857,7 @@ def main() -> None:
                 "model_language_id": MODEL_LANGUAGE_ID,
                 "device": device,
                 "sample_rate": SAMPLE_RATE,
+                "conditioning_strategy": conditioning_strategy,
                 "text_policy": {
                     "name": (
                         narration_plan.get("policy", {}).get("name")
@@ -1727,10 +1873,10 @@ def main() -> None:
                 "min_p": args.min_p,
                 "top_p": args.top_p,
                 "seed": args.seed,
-                "seed_strategy": RENDER_SEED_STRATEGY,
+                "seed_strategy": seed_strategy,
             }
-        if not args.remount and profile == FEMININA_PROFILE_NAME:
-            manifest["profile_calibration"] = FEMININA_PROFILE_CALIBRATION
+        if not args.remount and profile in VOICE_PROFILES:
+            manifest["profile_calibration"] = VOICE_PROFILES[profile]["calibration"]
         write_json(manifest_path, manifest)
         if not args.remount:
             journal["status"] = "complete"

@@ -244,10 +244,18 @@ def main() -> None:
     )
     import render_chatterbox as render_chatterbox_module
     from render_chatterbox import (
+        AUDIO_PROMPT_PER_GENERATE_STRATEGY,
         DEFAULT_MODEL_ROOT,
         DEFAULT_REFERENCE_VOICE,
         FEMININA_PROFILE,
         FEMININA_PROFILE_CALIBRATION,
+        FIXED_PER_SEGMENT_SEED_STRATEGY,
+        MASCULINA_PROFILE,
+        MASCULINA_PROFILE_CALIBRATION,
+        MASCULINA_REFERENCE_VOICE,
+        PER_SEGMENT_INDEX_SEED_STRATEGY,
+        PRECOMPUTED_CONDITIONALS_STRATEGY,
+        VOICE_PROFILES,
         compatible_render_identity,
         copy_or_link_atomically,
         load_render_journal,
@@ -280,6 +288,26 @@ def main() -> None:
     assert FEMININA_PROFILE["min_p"] == 0.114
     assert FEMININA_PROFILE["seed"] == 20260713
     assert FEMININA_PROFILE_CALIBRATION["winner_id"] == "minp-0-114-temp-0-80"
+    assert (
+        VOICE_PROFILES["feminina-v1"]["conditioning_strategy"]
+        == PRECOMPUTED_CONDITIONALS_STRATEGY
+    )
+    assert (
+        VOICE_PROFILES["feminina-v1"]["seed_strategy"]
+        == PER_SEGMENT_INDEX_SEED_STRATEGY
+    )
+    assert MASCULINA_PROFILE["exaggeration"] == 0.5
+    assert MASCULINA_PROFILE["cfg_weight"] == 0.35
+    assert MASCULINA_PROFILE["seed"] == 54321
+    assert MASCULINA_PROFILE_CALIBRATION["winner_id"] == "seed54321-base"
+    assert (
+        VOICE_PROFILES["masculina-v1"]["conditioning_strategy"]
+        == AUDIO_PROMPT_PER_GENERATE_STRATEGY
+    )
+    assert (
+        VOICE_PROFILES["masculina-v1"]["seed_strategy"]
+        == FIXED_PER_SEGMENT_SEED_STRATEGY
+    )
     profile_args = SimpleNamespace(
         max_chars=FEMININA_PROFILE["max_chars"],
         silence_seconds=FEMININA_PROFILE["silence_seconds"],
@@ -304,6 +332,40 @@ def main() -> None:
         )
         == "feminina-v1"
     )
+    masculina_args = SimpleNamespace(
+        max_chars=MASCULINA_PROFILE["max_chars"],
+        silence_seconds=MASCULINA_PROFILE["silence_seconds"],
+        exaggeration=MASCULINA_PROFILE["exaggeration"],
+        cfg_weight=MASCULINA_PROFILE["cfg_weight"],
+        temperature=MASCULINA_PROFILE["temperature"],
+        repetition_penalty=MASCULINA_PROFILE["repetition_penalty"],
+        min_p=MASCULINA_PROFILE["min_p"],
+        top_p=MASCULINA_PROFILE["top_p"],
+        seed=MASCULINA_PROFILE["seed"],
+    )
+    assert (
+        selected_profile(
+            masculina_args,
+            MASCULINA_REFERENCE_VOICE.resolve(),
+            DEFAULT_MODEL_ROOT.resolve(),
+            "cuda",
+            MASCULINA_PROFILE_CALIBRATION["model"],
+            MASCULINA_PROFILE_CALIBRATION["chatterbox_tts_version"],
+        )
+        == "masculina-v1"
+    )
+    masculina_args.seed = 1
+    assert (
+        selected_profile(
+            masculina_args,
+            MASCULINA_REFERENCE_VOICE.resolve(),
+            DEFAULT_MODEL_ROOT.resolve(),
+            "cuda",
+            MASCULINA_PROFILE_CALIBRATION["model"],
+            MASCULINA_PROFILE_CALIBRATION["chatterbox_tts_version"],
+        )
+        == "custom"
+    )
     profile_args.silence_seconds = 0.0
     assert (
         selected_profile(
@@ -320,24 +382,54 @@ def main() -> None:
         {
             "engine": "test",
             "runtime": {"renderer_sha256": "a"},
-            "generation": {"seed": 1},
+            "generation": {
+                "seed": 1,
+                "seed_strategy": PER_SEGMENT_INDEX_SEED_STRATEGY,
+            },
         },
         {
             "engine": "test",
             "runtime": {"renderer_sha256": "b"},
-            "generation": {"seed": 1},
+            "generation": {
+                "seed": 1,
+                "seed_strategy": PER_SEGMENT_INDEX_SEED_STRATEGY,
+            },
         },
     )
     assert not compatible_render_identity(
         {
             "engine": "test",
             "runtime": {"renderer_sha256": "a"},
-            "generation": {"seed": 1},
+            "generation": {
+                "seed": 1,
+                "seed_strategy": PER_SEGMENT_INDEX_SEED_STRATEGY,
+            },
         },
         {
             "engine": "test",
             "runtime": {"renderer_sha256": "b"},
-            "generation": {"seed": 2},
+            "generation": {
+                "seed": 2,
+                "seed_strategy": PER_SEGMENT_INDEX_SEED_STRATEGY,
+            },
+        },
+    )
+    assert not compatible_render_identity(
+        {
+            "engine": "test",
+            "runtime": {"renderer_sha256": "a"},
+            "generation": {
+                "seed": 1,
+                "seed_strategy": PER_SEGMENT_INDEX_SEED_STRATEGY,
+            },
+        },
+        {
+            "engine": "test",
+            "runtime": {"renderer_sha256": "b"},
+            "generation": {
+                "seed": 1,
+                "seed_strategy": FIXED_PER_SEGMENT_SEED_STRATEGY,
+            },
         },
     )
     profile_args.silence_seconds = FEMININA_PROFILE["silence_seconds"]
@@ -584,6 +676,7 @@ def main() -> None:
                 text=retry_segment.text,
                 target=retry_path,
                 voice_reference=root / "voice.wav",
+                conditioning_strategy=AUDIO_PROMPT_PER_GENERATE_STRATEGY,
                 exaggeration=0.0,
                 cfg_weight=0.0,
                 temperature=0.0,
@@ -601,6 +694,35 @@ def main() -> None:
         assert attempts[0]["status"] == "rejected"
         assert attempts[0]["seed"] == 100
         assert "reason" in attempts[0]
+        assert attempts[1]["status"] == "accepted"
+        render_calls.clear()
+        seed_calls.clear()
+        try:
+            render_chatterbox_module.seed_torch = fake_seed_torch
+            render_chatterbox_module.render_segment = fake_render_segment
+            accepted_seed, attempts = render_chatterbox_module.render_segment_with_retries(
+                segment_index=1,
+                model=object(),
+                text=retry_segment.text,
+                target=retry_path,
+                voice_reference=root / "voice.wav",
+                conditioning_strategy=PRECOMPUTED_CONDITIONALS_STRATEGY,
+                exaggeration=0.0,
+                cfg_weight=0.0,
+                temperature=0.0,
+                repetition_penalty=0.0,
+                min_p=0.0,
+                top_p=0.0,
+                seed=100,
+                device="cpu",
+                skip_initial_seed=True,
+            )
+        finally:
+            render_chatterbox_module.render_segment = original_render_segment
+            render_chatterbox_module.seed_torch = original_seed_torch
+        assert accepted_seed == render_chatterbox_module.render_retry_seed(100, 1, 1)
+        assert seed_calls == [(accepted_seed, "cpu")]
+        assert attempts[0]["status"] == "rejected"
         assert attempts[1]["status"] == "accepted"
         retry_record = segment_record(
             7,
@@ -1142,6 +1264,14 @@ def main() -> None:
         _, identity_free_records = load_render_journal(resume_journal_path, None)
         assert identity_free_records == loaded_records
         assert segment_seed(20260713, 2) == 20260714
+        assert (
+            segment_seed(54321, 1, FIXED_PER_SEGMENT_SEED_STRATEGY)
+            == 54321
+        )
+        assert (
+            segment_seed(54321, 2, FIXED_PER_SEGMENT_SEED_STRATEGY)
+            == 54321
+        )
         assert segment_seed(None, 1) is None
         resume_segment_path.write_bytes(b"not a WAV")
         assert not reusable_segment_record(
@@ -3705,6 +3835,9 @@ def main() -> None:
             chatterbox_segment = (
                 chatterbox_smoke_output / "segments" / "segment-0001.wav"
             )
+            chatterbox_master_wav = (
+                chatterbox_smoke_output / "raw" / "audiobook.master.wav"
+            )
             chatterbox_final_wav = chatterbox_smoke_output / "raw" / "audiobook.wav"
             chatterbox_final_audio = chatterbox_smoke_output / "audiobook.wav"
             assert chatterbox_manifest["mock"] is False
@@ -3724,6 +3857,7 @@ def main() -> None:
             ]
             assert chatterbox_manifest["duration_seconds"] > 0
             assert chatterbox_segment.is_file() and chatterbox_segment.stat().st_size > 44
+            assert chatterbox_master_wav.is_file()
             assert chatterbox_final_wav.is_file()
             assert chatterbox_final_audio.is_file()
             assert (
@@ -3731,12 +3865,24 @@ def main() -> None:
                 == sha256_file(chatterbox_final_wav)
             )
             assert (
-                chatterbox_manifest["final_wav_sha256"]
+                chatterbox_manifest["master_wav_sha256"]
+                == sha256_file(chatterbox_master_wav)
+            )
+            assert (
+                chatterbox_manifest["master_wav_sha256"]
                 == FEMININA_PROFILE_CALIBRATION["main_prompt_wav_sha256"]
             )
             assert (
                 chatterbox_manifest["final_audio_sha256"]
                 == sha256_file(chatterbox_final_audio)
+            )
+            run(
+                str(ROOT / "narration_plan.py"),
+                "--book-root",
+                str(image_book_root),
+                "--input-file",
+                str(archaic_locutor),
+                "--refresh-approved-metadata",
             )
             chatterbox_lineage_output = audio_root / "chatterbox-cuda-lineage"
             run_with_python(

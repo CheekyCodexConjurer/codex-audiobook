@@ -1,0 +1,89 @@
+{
+  "schema_version": "1.0",
+  "profile_name": "masculina-v1",
+  "status": "approved",
+  "engine": "chatterbox-multilingual-v3-pt-br",
+  "conditioning_strategy": "audio-prompt-per-generate-v1",
+  "seed_strategy": "fixed-per-segment-v1",
+  "voice_reference": {
+    "path": "assets/voices/Masculina.mp3",
+    "sha256": "d660006b44018d1e3e4d2aeb287109f53df20810322cceac558b5a8cc44797c3"
+  },
+  "text_policy": {
+    "name": "line-delimited-v1",
+    "max_chars": 320
+  },
+  "parameters": {
+    "max_chars": 320,
+    "silence_seconds": 0.22,
+    "exaggeration": 0.5,
+    "cfg_weight": 0.35,
+    "temperature": 0.8,
+    "repetition_penalty": 1.2,
+    "min_p": 0.05,
+    "top_p": 1.0,
+    "seed": 54321
+  },
+  "calibration": {
+    "selection_id": "final-selection-2026-07-17",
+    "corpus": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\validation-corpus\\corpus.json",
+      "sha256": "bd45c68e3b5fbdc64079e90a71cdd2263f637eaa584052ff0ed273ba7fc64dff"
+    },
+    "selection": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\selection\\final-selection.json",
+      "sha256": "7118511e73ef93e29e3187302a324d975b0068b5cb0c1777aea4f53e64e4ce88",
+      "winner_id": "seed54321-base",
+      "robust_score": 0.656964,
+      "mean_composite_score": 0.679199,
+      "minimum_composite_score": 0.605084
+    }
+  },
+  "runtime": {
+    "device": "cuda",
+    "model_root": "E:\\Pessoal\\tts\\chatterbox-multilingual-v3\\models",
+    "chatterbox_tts_version": "0.1.7",
+    "renderer_sha256": "8339038d9b97200d519e96db396ea44804cdb6bfdb0ba7522e219300b8e7fc23",
+    "model": {
+      "t3_sha256": "074aaf65255eb9cb960288f7cc72e09d3b5008f6e0b14868c0d4e5b0bd7cbb6c",
+      "s3gen_sha256": "f7abce4b196dae2d08d9296cbebc6521b046079577643b42a19a03499d08721e",
+      "voice_encoder_sha256": "4b16d836bc598509860f6fa068165a8bb5e9ac84f05582dfcf278a5a372879f1"
+    }
+  },
+  "listening_review": {
+    "status": "approved",
+    "reviewed_by": "Matheus",
+    "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\selection\\listening-review.json",
+    "sha256": "a0c35057f8ff6d7d09b484e4bac51c8c715d06fbf4850d74310d47b713f20ac4",
+    "scope": "blinded review of four finalists across narration, dialogue, and numeric/date prompts",
+    "result": "Candidate A (seed54321-base) won all three prompts."
+  },
+  "dsp": {
+    "status": "raw-wav-retained",
+    "notes": "No DSP chain was adopted. The blind comparison used uniformly encoded derivatives; the immutable 1.0x raw WAV remains the production master."
+  },
+  "reproduction": {
+    "input": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\validation-corpus\\01-narracao.txt",
+      "sha256": "19634674762dd9114d4f9dd0996363e987fce3f3c9b9e68a36af7eb11cb984a6"
+    },
+    "raw_wav": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\selection\\production-smoke-masculina-v1-fixed-seed-v2\\raw\\audiobook.master.wav",
+      "sha256": "9e7dded736aa1d8abfc39a5946551e5543f88e332e775165d309e8a11f015eed",
+      "duration_seconds": 22.16
+    },
+    "publication_wav": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\selection\\production-smoke-masculina-v1-fixed-seed-v2\\raw\\audiobook.wav",
+      "sha256": "9a1881c92d8943bdc590221b42f3f40c1f6cffe8757c05159c2f8840ac7f3d01",
+      "tempo": 1.2
+    },
+    "delivery_mp3": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\selection\\production-smoke-masculina-v1-fixed-seed-v2\\audiobook.mp3",
+      "sha256": "47c8653ae1e024f478b5c817c0f012c9914194408e39f9ebb6413dc6b3aa41fd"
+    },
+    "manifest": {
+      "path": "E:\\Pessoal\\e-books\\_voice-calibration-masculina\\selection\\production-smoke-masculina-v1-fixed-seed-v2\\audio-manifest.json",
+      "sha256": "72b2bbf974adf883d5b1c2dabc1a1851285795a84dfd5dbf083ee9d5ce9220aa"
+    }
+  }
+}
