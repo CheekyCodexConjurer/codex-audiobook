@@ -193,7 +193,80 @@ def resolve_pdftoppm() -> str:
     return str(wrapper)
 
 
-def rendered_pdf_pages(source: Path, output_root: Path, page_count: int, dpi: int, rotation: str, layout: str) -> list[dict]:
+def spread_signal(image: object) -> bool:
+    """Return whether one rendered landscape page visibly contains a central gutter."""
+    width, height = image.size
+    if height <= 0 or width / height < 1.15:
+        return False
+
+    sample_height = 400
+    sample_width = max(1, round(width * sample_height / height))
+    grayscale = image.convert("L").resize((sample_width, sample_height))
+    start_y = round(sample_height * 0.05)
+    end_y = round(sample_height * 0.95)
+    column_height = max(1, end_y - start_y)
+    start_x = round(sample_width * 0.43)
+    end_x = round(sample_width * 0.57)
+    column_means: list[float] = []
+    dark_fractions: list[float] = []
+    for x in range(sample_width):
+        values = [grayscale.getpixel((x, y)) for y in range(start_y, end_y)]
+        column_means.append(sum(values) / column_height)
+        dark_fractions.append(sum(value < 130 for value in values) / column_height)
+
+    for x in range(start_x, end_x):
+        neighbor_columns = (
+            column_means[max(0, x - 18) : max(0, x - 7)]
+            + column_means[min(sample_width, x + 8) : min(sample_width, x + 19)]
+        )
+        if not neighbor_columns:
+            continue
+        if (
+            dark_fractions[x] >= 0.2
+            and sum(neighbor_columns) / len(neighbor_columns) - column_means[x] >= 10
+        ):
+            return True
+    return False
+
+
+def resolve_rendered_layout(
+    physical_paths: list[Path],
+    image_module: object,
+    requested_layout: str,
+) -> tuple[str, dict]:
+    if requested_layout != "auto":
+        return requested_layout, {
+            "requested": requested_layout,
+            "resolved": requested_layout,
+            "method": "explicit",
+        }
+
+    inspected = min(len(physical_paths), 12)
+    signals = 0
+    for path in physical_paths[:inspected]:
+        with image_module.open(path) as opened:
+            signals += int(spread_signal(opened))
+
+    threshold = max(1, (inspected + 1) // 2)
+    resolved_layout = "spread" if signals >= threshold else "single"
+    return resolved_layout, {
+        "requested": "auto",
+        "resolved": resolved_layout,
+        "method": "rendered-central-gutter",
+        "inspected_pages": inspected,
+        "spread_signals": signals,
+        "threshold": threshold,
+    }
+
+
+def rendered_pdf_pages(
+    source: Path,
+    output_root: Path,
+    page_count: int,
+    dpi: int,
+    rotation: str,
+    layout: str,
+) -> tuple[list[dict], str, dict]:
     executable = resolve_pdftoppm()
 
     image_module = require_pillow()
@@ -222,9 +295,7 @@ def rendered_pdf_pages(source: Path, output_root: Path, page_count: int, dpi: in
         "ccw90": 90,
         "180": 180,
     }[rotation]
-    records: list[dict] = []
-    logical_page = 1
-
+    physical_paths: list[Path] = []
     for source_page in range(1, page_count + 1):
         physical_target = physical_dir / f"page-{source_page:04d}.png"
         raw_path = raw_pages[source_page]
@@ -234,8 +305,18 @@ def rendered_pdf_pages(source: Path, output_root: Path, page_count: int, dpi: in
                 image = image.rotate(rotation_degrees, expand=True)
             image.save(physical_target)
         raw_path.unlink()
+        physical_paths.append(physical_target)
 
-        if layout == "single":
+    resolved_layout, detection = resolve_rendered_layout(
+        physical_paths,
+        image_module,
+        layout,
+    )
+    records: list[dict] = []
+    logical_page = 1
+
+    for source_page, physical_target in enumerate(physical_paths, start=1):
+        if resolved_layout == "single":
             logical_target = logical_dir / f"page-{logical_page:04d}.png"
             shutil.copy2(physical_target, logical_target)
             records.append(
@@ -281,7 +362,7 @@ def rendered_pdf_pages(source: Path, output_root: Path, page_count: int, dpi: in
                 )
                 logical_page += 1
 
-    return records
+    return records, resolved_layout, detection
 
 
 def pdf_map(source: Path, output_root: Path, dpi: int, layout: str, rotation: str, skip_render: bool) -> tuple[dict, list[dict]]:
@@ -307,11 +388,17 @@ def pdf_map(source: Path, output_root: Path, dpi: int, layout: str, rotation: st
         extraction_mode = "mixed"
 
     if skip_render:
-        logical_count = page_count * (2 if layout == "spread" else 1)
+        resolved_layout = "single" if layout == "auto" else layout
+        detection = {
+            "requested": layout,
+            "resolved": resolved_layout,
+            "method": "skip-render-safe-default" if layout == "auto" else "explicit",
+        }
+        logical_count = page_count * (2 if resolved_layout == "spread" else 1)
         pages = []
         for logical_page in range(1, logical_count + 1):
-            source_page = (logical_page + 1) // 2 if layout == "spread" else logical_page
-            side = "left" if layout == "spread" and logical_page % 2 else "right" if layout == "spread" else "single"
+            source_page = (logical_page + 1) // 2 if resolved_layout == "spread" else logical_page
+            side = "left" if resolved_layout == "spread" and logical_page % 2 else "right" if resolved_layout == "spread" else "single"
             pages.append(
                 {
                     "logical_page": logical_page,
@@ -327,7 +414,14 @@ def pdf_map(source: Path, output_root: Path, dpi: int, layout: str, rotation: st
                 }
             )
     else:
-        pages = rendered_pdf_pages(source, output_root, page_count, dpi, rotation, layout)
+        pages, resolved_layout, detection = rendered_pdf_pages(
+            source,
+            output_root,
+            page_count,
+            dpi,
+            rotation,
+            layout,
+        )
         logical_count = len(pages)
 
     source_data = {
@@ -338,7 +432,12 @@ def pdf_map(source: Path, output_root: Path, dpi: int, layout: str, rotation: st
         "page_count_logical": logical_count,
         "text_layer_pages": text_pages,
     }
-    return {"source": source_data, "extraction_mode": extraction_mode}, pages
+    return {
+        "source": source_data,
+        "extraction_mode": extraction_mode,
+        "layout": resolved_layout,
+        "layout_detection": detection,
+    }, pages
 
 
 def epub_spine_documents(source: Path) -> list[str]:
@@ -428,7 +527,15 @@ def main() -> None:
         type=Path,
         help="Explicit public book root. Its name must match title, year, and author.",
     )
-    parser.add_argument("--layout", choices=("single", "spread"), default="single")
+    parser.add_argument(
+        "--layout",
+        choices=("auto", "single", "spread"),
+        default="auto",
+        help=(
+            "Detect two-page scans from rendered central gutters by default. "
+            "Use single or spread only to override that detection."
+        ),
+    )
     parser.add_argument("--rotation", choices=("normal", "cw90", "ccw90", "180"), default="normal")
     parser.add_argument("--dpi", type=int, default=220)
     parser.add_argument("--source-language", default="")
@@ -518,9 +625,10 @@ def main() -> None:
             args.rotation,
             args.skip_render,
         )
+        resolved_layout = preflight["layout"]
     elif suffix == ".epub":
         preflight, pages = epub_map(source)
-        args.layout = "reflow"
+        resolved_layout = "reflow"
         args.rotation = "normal"
     else:
         raise SystemExit("Only .pdf and .epub source files are supported.")
@@ -537,7 +645,7 @@ def main() -> None:
         "source": preflight["source"],
         "analysis": {
             "status": "needs_analysis",
-            "layout": args.layout,
+            "layout": resolved_layout,
             "rotation": args.rotation,
             "extraction_mode": preflight["extraction_mode"],
             "source_language": args.source_language,
@@ -553,6 +661,8 @@ def main() -> None:
             "Preflight establishes physical and logical coverage only. Codex must complete structural analysis before transcription."
         ],
     }
+    if suffix == ".pdf":
+        book_map["analysis"]["layout_detection"] = preflight["layout_detection"]
     book_map["source"].update(
         {
             "path": source.relative_to(output_root).as_posix(),

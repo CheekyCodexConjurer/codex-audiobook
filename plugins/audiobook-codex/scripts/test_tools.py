@@ -223,6 +223,17 @@ def write_pdf_with_image(path: Path, image_path: Path) -> None:
     image.save(path, "PDF", resolution=72.0)
 
 
+def write_spread_pdf(path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (720, 480), color="white")
+    draw = ImageDraw.Draw(image)
+    draw.line((360, 0, 360, 480), fill="black", width=4)
+    draw.rectangle((72, 72, 288, 408), outline="black", width=3)
+    draw.rectangle((432, 72, 648, 408), outline="black", width=3)
+    image.save(path, "PDF", resolution=72.0)
+
+
 def create_junction(link: Path, target: Path) -> None:
     command = subprocess.list2cmdline(["mklink", "/J", str(link), str(target)])
     completed = subprocess.run(
@@ -1355,6 +1366,15 @@ def main() -> None:
         initial_map = json.loads(map_path.read_text(encoding="utf-8"))
         assert initial_map["source"]["path"] == "source/original.pdf"
         assert initial_map["source"]["original_path"] == str(pdf_path.resolve())
+        assert initial_map["analysis"]["layout"] == "single"
+        assert initial_map["analysis"]["layout_detection"] == {
+            "requested": "auto",
+            "resolved": "single",
+            "method": "rendered-central-gutter",
+            "inspected_pages": 1,
+            "spread_signals": 0,
+            "threshold": 1,
+        }
         assert (book_root / "source" / "original.pdf").read_bytes() == pdf_path.read_bytes()
 
         same_name_dir = root / "different-source"
@@ -1496,6 +1516,44 @@ def main() -> None:
         spread = json.loads(spread_map.read_text(encoding="utf-8"))
         assert spread["source"]["page_count_logical"] == 2
         assert [page["side"] for page in spread["pages"]] == ["left", "right"]
+
+        detected_spread_pdf = root / "detected-spread.pdf"
+        write_spread_pdf(detected_spread_pdf)
+        detected_library = root / "detected-spread-library"
+        detected_map = (
+            detected_library
+            / "Livro Detectado - 1935 - Autor Teste"
+            / "assembly"
+            / "metadata"
+            / "book-map.json"
+        )
+        run(
+            str(ROOT / "preflight.py"),
+            "--source",
+            str(detected_spread_pdf),
+            "--library-root",
+            str(detected_library),
+            "--title",
+            "Livro Detectado",
+            "--publication-year",
+            "1935",
+            "--author",
+            "Autor Teste",
+            "--dpi",
+            "72",
+        )
+        run(
+            str(ROOT / "validate_book_map.py"),
+            "--book-map",
+            str(detected_map),
+            "--check-files",
+        )
+        detected_spread = json.loads(detected_map.read_text(encoding="utf-8"))
+        assert detected_spread["analysis"]["layout"] == "spread"
+        assert detected_spread["analysis"]["layout_detection"]["requested"] == "auto"
+        assert detected_spread["analysis"]["layout_detection"]["resolved"] == "spread"
+        assert detected_spread["source"]["page_count_logical"] == 2
+        assert [page["side"] for page in detected_spread["pages"]] == ["left", "right"]
 
         epub_path = root / "source.epub"
         epub_library = root / "epub-library"
