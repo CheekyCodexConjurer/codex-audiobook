@@ -11,3 +11,4 @@ __pycache__/
 artifacts/
 books/
 -.png
+tmp/
