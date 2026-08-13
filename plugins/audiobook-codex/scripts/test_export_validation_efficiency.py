@@ -11,6 +11,7 @@ import pypdf
 
 import validate_epub_export as epub_validator
 import validate_pdf_export as pdf_validator
+from export_epub import document_markup
 
 
 def sha256_file(path: Path) -> str:
@@ -165,6 +166,102 @@ def test_epub_document_text_regression_still_reports_mismatch() -> None:
         ]
 
 
+def semantic_note_fixture_blocks(start_line: int) -> dict:
+    def span(line: int) -> dict:
+        return {
+            "source_file": "text/source/pages/page-0001.txt",
+            "start_line": line,
+            "end_line": line,
+        }
+
+    return {
+        "heading": {"kind": "heading", "level": 2, "spans": [span(start_line)]},
+        "paragraph": {"kind": "paragraph", "spans": [span(start_line + 1)]},
+        "glued_note": {
+            "kind": "note",
+            "id": "note-2",
+            "marker": "2",
+            "spans": [span(start_line + 2)],
+        },
+        "separated_note": {
+            "kind": "note",
+            "id": "note-star",
+            "marker": "*",
+            "spans": [span(start_line + 3)],
+        },
+        "absent_marker_note": {
+            "kind": "note",
+            "id": "note-dagger",
+            "marker": "†",
+            "spans": [span(start_line + 4)],
+        },
+    }
+
+
+def write_semantic_note_epub_fixture(book_root: Path) -> tuple[Path, list[dict]]:
+    epub_path = book_root / "exports" / "epub" / "notes.epub"
+    epub_path.parent.mkdir(parents=True)
+    page = book_root / "text" / "source" / "pages" / "page-0001.txt"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "Título\n"
+        "Referência anotada2.\n"
+        "2Sobre a obra, ver nota.\n"
+        "* Continuação da nota.\n"
+        "Nota sem marcador na fonte.\n",
+        encoding="utf-8",
+    )
+    blocks = semantic_note_fixture_blocks(1)
+    documents = [
+        {
+            "id": "chapter-001",
+            "title": "Título",
+            "kind": "chapter",
+            "_layout_blocks": [
+                blocks["heading"],
+                blocks["paragraph"],
+                blocks["glued_note"],
+                blocks["separated_note"],
+                blocks["absent_marker_note"],
+            ],
+            "_revision_changes": [],
+            "asset_ids": [],
+        }
+    ]
+    markup = document_markup(documents[0], "pt-BR", [], book_root)
+    with zipfile.ZipFile(epub_path, "w") as archive:
+        archive.writestr("OEBPS/text/001-chapter-001.xhtml", markup)
+    return epub_path, documents
+
+
+def test_epub_note_parity_for_glued_and_absent_markers() -> None:
+    with tempfile.TemporaryDirectory() as raw_root:
+        book_root = Path(raw_root)
+        epub_path, documents = write_semantic_note_epub_fixture(book_root)
+
+        with epub_validator.EpubArchiveCache(epub_path) as archive:
+            errors = epub_validator.validate_epub_document_texts(
+                epub_path,
+                book_root,
+                documents,
+                "original",
+                archive,
+            )
+        assert errors == []
+
+        with zipfile.ZipFile(epub_path) as archive:
+            xhtml = archive.read(
+                "OEBPS/text/001-chapter-001.xhtml"
+            ).decode("utf-8")
+        assert (
+            '<sup><a epub:type="backlink" href="#noteref-note-2">2</a></sup> '
+            "Sobre a obra, ver nota." in xhtml
+        )
+        assert "<sup>*</sup> Continuação da nota." in xhtml
+        assert "<sup>†</sup> Nota sem marcador na fonte." in xhtml
+        assert "2Sobre" not in xhtml
+
+
 class FakePage:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -278,6 +375,7 @@ def test_pdf_text_regression_still_reports_missing_fragment() -> None:
 def run_tests() -> None:
     test_epub_validation_reuses_one_zip_and_cached_entries()
     test_epub_document_text_regression_still_reports_mismatch()
+    test_epub_note_parity_for_glued_and_absent_markers()
     test_pdf_main_reuses_one_reader_and_one_text_extraction_per_page()
     test_pdf_text_regression_still_reports_missing_fragment()
 

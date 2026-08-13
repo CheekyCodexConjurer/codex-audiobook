@@ -116,6 +116,7 @@ def build_semantic_pdf_fixture(book_root: Path) -> Path:
             "Referência anotada (AUTOR, 1900, p. 12).2",
             "2 Nota validada no PDF.",
             "Texto posterior à chamada continua acima do rodapé.",
+            "Nota de continuação sem chamada própria.",
         ]
     )
     page_path.write_text(page_text, encoding="utf-8")
@@ -126,7 +127,8 @@ def build_semantic_pdf_fixture(book_root: Path) -> Path:
         "— Fala direta preservada no PDF sem achatamento indevido.\n\n"
         "Primeiro verso curto\nSegundo verso curto\n\n"
         "Referência anotada (AUTOR, 1900, p. 12).2\n2 Nota validada no PDF.\n"
-        "Texto posterior à chamada continua acima do rodapé.\n",
+        "Texto posterior à chamada continua acima do rodapé.\n"
+        "Nota de continuação sem chamada própria.\n",
         encoding="utf-8",
     )
     page_sha256 = sha256_file(page_path)
@@ -254,6 +256,12 @@ def build_semantic_pdf_fixture(book_root: Path) -> Path:
                         "spans": [span(page_sha256, 8, 8)],
                     },
                     {"kind": "paragraph", "spans": [span(page_sha256, 9, 9)]},
+                    {
+                        "kind": "note",
+                        "id": "note-star-continuation",
+                        "marker": "*",
+                        "spans": [span(page_sha256, 10, 10)],
+                    },
                 ],
             }
         ],
@@ -682,6 +690,7 @@ def test_original_semantic_pdf_export_and_validation() -> None:
         assert "Texto fiel preservado" in extracted_text
         assert "Primeiro verso curto" in extracted_text
         assert "Nota validada no PDF" in extracted_text
+        assert "Nota de continuação sem chamada" in extracted_text
         assert "Texto posterior à chamada" in extracted_text
         assert str(reader.metadata.title) == "PDF de Teste"
         titles = outline_titles(reader.outline)

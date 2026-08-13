@@ -24,6 +24,7 @@ from export_epub import (
     _layout_text_values,
     join_semantic_values,
     load_export_context,
+    note_body_text,
     paragraphs_from_text,
     published_documents,
     reader_documents,
@@ -101,6 +102,23 @@ def element_text(element: ET.Element) -> str:
 
 def normalized_text(value: str) -> str:
     return " ".join(value.split())
+
+
+def expected_block_text(
+    block: dict,
+    book_root: Path,
+    revision_changes: list[dict],
+) -> list[str]:
+    """Semantic text the exporter renders for one layout block.
+
+    Note blocks render their marker once (as superscript) before the note
+    body, so the expected model carries the same marker prefix.
+    """
+    if block.get("kind") != "note":
+        return _layout_text_values(block, book_root, revision_changes)
+    lines = _layout_text_values(block, book_root, revision_changes)
+    marker = str(block["marker"])
+    return [f"{marker} {note_body_text(lines, marker)}"]
 
 
 def validate_epub_archive(
@@ -359,7 +377,7 @@ def validate_epub_document_texts(
                             [
                                 value
                                 for block in block_group
-                                for value in _layout_text_values(
+                                for value in expected_block_text(
                                     block,
                                     book_root,
                                     revision_changes,

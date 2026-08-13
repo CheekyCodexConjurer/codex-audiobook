@@ -4,7 +4,12 @@ from pathlib import Path
 import tempfile
 
 from epub_presentation import default_visual_profile, profile_stylesheet
-from export_epub import nav_markup, note_reference_markup, semantic_body_parts
+from export_epub import (
+    nav_markup,
+    note_body_text,
+    note_reference_markup,
+    semantic_body_parts,
+)
 
 
 def block(kind: str, start_line: int, end_line: int, **extra: object) -> dict:
@@ -257,6 +262,60 @@ def test_title_page_assets_follow_content_and_nav_is_named_sumario() -> None:
     assert "Lista de Quadros" not in nav
 
 
+def test_note_body_text_strips_glued_and_separated_markers() -> None:
+    assert note_body_text(["4Sobre a obra."], "4") == "Sobre a obra."
+    assert note_body_text(["4 Sobre a obra."], "4") == "Sobre a obra."
+    assert note_body_text(["4  Sobre a obra."], "4") == "Sobre a obra."
+    assert note_body_text(["*Primeira linha.", "Segunda linha."], "*") == (
+        "Primeira linha. Segunda linha."
+    )
+
+
+def test_note_body_text_does_not_invent_marker_for_continuation() -> None:
+    assert note_body_text(["Continuação sem marcador."], "*") == (
+        "Continuação sem marcador."
+    )
+
+
+def test_glued_note_marker_is_rendered_once() -> None:
+    with tempfile.TemporaryDirectory() as raw_root:
+        book_root = Path(raw_root)
+        page = book_root / "text" / "source" / "pages" / "page-0001.txt"
+        page.parent.mkdir(parents=True)
+        page.write_text("Referência anotada2.\n2Sobre a obra, ver nota.\n", encoding="utf-8")
+        parts = "\n".join(
+            semantic_body_parts(
+                [
+                    block("paragraph", 1, 1),
+                    block("note", 2, 2, id="note-2", marker="2"),
+                ],
+                book_root,
+                [],
+            )
+        )
+
+    assert '<sup><a epub:type="backlink" href="#noteref-note-2">2</a></sup> Sobre a obra, ver nota.' in parts
+    assert "2Sobre" not in parts
+
+
+def test_absent_continuation_marker_is_not_invented_or_removed() -> None:
+    with tempfile.TemporaryDirectory() as raw_root:
+        book_root = Path(raw_root)
+        page = book_root / "text" / "source" / "pages" / "page-0001.txt"
+        page.parent.mkdir(parents=True)
+        page.write_text("Continuação do texto.\n", encoding="utf-8")
+        parts = "\n".join(
+            semantic_body_parts(
+                [block("note", 1, 1, id="note-star", marker="*")],
+                book_root,
+                [],
+            )
+        )
+
+    assert '<sup>*</sup> Continuação do texto.' in parts
+    assert parts.count("Continuação do texto.") == 1
+
+
 def run_tests() -> None:
     test_note_reference_markup_links_only_attached_markers()
     test_attached_symbol_after_punctuation_is_linked()
@@ -268,6 +327,10 @@ def run_tests() -> None:
     test_semantic_quotation_uses_a_bilateral_block_style()
     test_dialogue_and_verse_styles_use_requested_alignment()
     test_title_page_assets_follow_content_and_nav_is_named_sumario()
+    test_note_body_text_strips_glued_and_separated_markers()
+    test_note_body_text_does_not_invent_marker_for_continuation()
+    test_glued_note_marker_is_rendered_once()
+    test_absent_continuation_marker_is_not_invented_or_removed()
 
 
 if __name__ == "__main__":

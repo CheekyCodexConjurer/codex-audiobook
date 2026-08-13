@@ -64,7 +64,7 @@ _SUPPLEMENTARY_FLUID_TITLES = {
 }
 ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 EPUB_MODIFIED = "2000-01-01T00:00:00Z"
-EXPORT_RENDER_CONTRACT_REVISION = "reader-export-render-v2"
+EXPORT_RENDER_CONTRACT_REVISION = "reader-export-render-v3"
 
 
 def sha256_file(path: Path) -> str:
@@ -1119,6 +1119,17 @@ def _note_marker_pattern(note_ids: dict[str, str]) -> re.Pattern[str] | None:
     return re.compile(rf"(?P<marker>{markers})")
 
 
+def strip_leading_note_marker(first_line: str, marker: str) -> str:
+    """Strip a leading note marker from a note first line when present, glued or separated."""
+    return re.sub(rf"^\s*{re.escape(marker)}", "", first_line).lstrip()
+
+
+def note_body_text(lines: list[str], marker: str) -> str:
+    """Semantic note body text: leading marker stripped when present, then remaining lines."""
+    first_line = strip_leading_note_marker(lines[0], marker)
+    return normalize_space(" ".join([first_line, *lines[1:]]))
+
+
 def _preceding_text_character(text: str, marker_start: int) -> str:
     index = marker_start - 1
     while index >= 0 and text[index] in '"\')]}.,;:!?—–-”’':
@@ -1343,9 +1354,7 @@ def semantic_block_markup(
     if kind == "note":
         marker = block["marker"]
         note_id = str(block["id"])
-        first_line = lines[0]
-        content = re.sub(rf"^\s*{re.escape(marker)}\s+", "", first_line)
-        note_lines = [content, *lines[1:]]
+        note_body = note_body_text(lines, marker)
         marker_markup = escape(marker)
         if note_id in reference_targets:
             backlink = str(reference_targets[note_id])
@@ -1357,7 +1366,7 @@ def semantic_block_markup(
             )
         return (
             f'    <aside id="{escape(note_id)}" epub:type="footnote" class="footnote">\n'
-            f"      <p><sup>{marker_markup}</sup> {escape(normalize_space(' '.join(note_lines)))}</p>\n"
+            f"      <p><sup>{marker_markup}</sup> {escape(note_body)}</p>\n"
             "    </aside>"
         )
     raise RuntimeError(f"Unsupported EPUB layout block kind: {kind}")

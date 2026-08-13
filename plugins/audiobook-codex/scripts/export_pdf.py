@@ -649,6 +649,8 @@ def write_pdf(
     assets_used: list[dict] = []
     image_buffers: list[BytesIO] = []
     story: list[object] = []
+    referenced_note_ids: set[str] = set()
+    rendered_note_ids: set[str] = set()
 
     def append_page_break() -> None:
         if story and isinstance(story[-1], PageBreak):
@@ -663,6 +665,7 @@ def write_pdf(
         if not reference_ids:
             story.append(flowable)
             return
+        referenced_note_ids.update(reference_ids)
         _width, flowable_height = flowable.wrap(available_width, available_height)
         required_height = flowable_height + footnote_height(reference_ids)
         if required_height > available_height:
@@ -746,6 +749,11 @@ def write_pdf(
             and is_fluid_supplementary_document(document)
         ):
             continue
+        rendered_note_ids.update(
+            str(block["id"])
+            for block in (document.get("_layout_blocks") or [])
+            if isinstance(block, dict) and block.get("kind") == "note"
+        )
         if document_index:
             append_page_break()
         assets = selected_assets_by_document[document["id"]]
@@ -897,6 +905,16 @@ def write_pdf(
                 "Approved revision changes are not represented by the semantic PDF layout: "
                 f"{missing}"
             )
+    endnote_ids = [
+        note_id
+        for note_id in note_records
+        if note_id in rendered_note_ids and note_id not in referenced_note_ids
+    ]
+    if endnote_ids:
+        story.append(PageBreak())
+        story.append(Paragraph("Notas", heading_styles[1]))
+        for note_id in endnote_ids:
+            story.append(footnote_paragraph(note_records[note_id]))
     output.parent.mkdir(parents=True, exist_ok=True)
     staged = temporary_output_path(output, ".pdf")
     if staged.exists():
